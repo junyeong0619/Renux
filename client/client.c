@@ -9,10 +9,41 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <pthread.h>
 #include "tui.h"
 
 #define PORT 8080
 #define BUF_SIZE 1024
+
+typedef struct {
+    int sock;
+    ChatWindows wins;
+} thread_args_t;
+
+void *receive_handler(void *args) {
+    thread_args_t *thread_args = (thread_args_t *)args;
+    int sock = thread_args->sock;
+    ChatWindows wins = thread_args->wins;
+    char server_reply[BUF_SIZE];
+    ssize_t read_size;
+
+    while((read_size = read(sock, server_reply, BUF_SIZE - 1)) > 0) {
+        server_reply[read_size] = '\0';
+        display_chat_message(wins.recv_win, "서버", server_reply);
+    }
+
+    if(read_size == 0) {
+        display_chat_message(wins.recv_win, "시스템", "서버와의 연결이 끊겼습니다.");
+    } else if(read_size == -1) {
+        display_chat_message(wins.recv_win, "시스템", "메시지 수신 오류가 발생했습니다.");
+    }
+
+    cleanup_client_tui();
+    printf("\n연결이 종료되었습니다. Enter를 눌러 프로그램을 종료하세요.\n");
+
+    return 0;
+}
+
 
 int main() {
     int sock = 0;
@@ -54,30 +85,31 @@ int main() {
     get_client_input(wins.send_win, buffer, BUF_SIZE);
     send(sock, buffer, strlen(buffer), 0);
 
+
     valread = read(sock, buffer, BUF_SIZE - 1);
     if (valread > 0) {
         buffer[valread] = '\0';
         display_chat_message(wins.recv_win, "서버", buffer);
 
         if (strcmp(buffer, "로그인 성공!") == 0) {
-            display_chat_message(wins.recv_win, "시스템", "채팅을 시작합니다. 'exit'를 입력해 종료하세요.");
+            display_chat_message(wins.recv_win, "시스템", "채팅 시작. 'exit' 입력 시 종료.");
+
+            pthread_t recv_thread;
+            thread_args_t args;
+            args.sock = sock;
+            args.wins = wins;
+
+            if (pthread_create(&recv_thread, NULL, receive_handler, (void*)&args) < 0) {
+                perror("수신 스레드 생성 실패");
+                cleanup_client_tui();
+                exit(EXIT_FAILURE);
+            }
 
             while(1) {
                 get_client_input(wins.send_win, buffer, BUF_SIZE);
-
-                if (strcmp(buffer, "exit") == 0) {
-                    send(sock, buffer, strlen(buffer), 0);
-                    break;
-                }
-
                 send(sock, buffer, strlen(buffer), 0);
 
-                valread = read(sock, buffer, BUF_SIZE - 1);
-                if (valread > 0) {
-                    buffer[valread] = '\0';
-                    display_chat_message(wins.recv_win, "서버", buffer);
-                } else {
-                    display_chat_message(wins.recv_win, "시스템", "서버와의 연결이 끊겼습니다.");
+                if (strcmp(buffer, "exit") == 0) {
                     break;
                 }
             }
