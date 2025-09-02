@@ -9,48 +9,72 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include "tui.h"
 
 #define PORT 8080
+#define BUF_SIZE 1024
 
 int main() {
     int sock = 0;
     ssize_t valread;
     struct sockaddr_in serv_addr;
-    const char *hello = "Hello from client";
-    char buffer[1024] = {0};
+    char buffer[BUF_SIZE] = {0};
+    ChatWindows wins;
 
-    // 1. 소켓 생성
+    // 1. TUI 초기화
+    init_client_tui(&wins);
+
+    // 2. 소켓 생성
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("Socket creation error");
+        display_chat_message(wins.recv_win, "오류", "소켓 생성 실패");
+        cleanup_client_tui();
         exit(EXIT_FAILURE);
     }
 
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(PORT);
 
-    // 2. 서버 주소 설정
     if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
-        perror("Invalid address/ Address not supported");
+        display_chat_message(wins.recv_win, "오류", "유효하지 않은 주소입니다.");
+        cleanup_client_tui();
         exit(EXIT_FAILURE);
     }
 
     // 3. 서버에 연결
     if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        perror("Connection Failed");
+        display_chat_message(wins.recv_win, "오류", "연결 실패");
+        cleanup_client_tui();
         exit(EXIT_FAILURE);
     }
-    printf("서버에 연결되었습니다.\n");
+    display_chat_message(wins.recv_win, "시스템", "서버에 연결되었습니다.");
 
-    // 4. 데이터 전송
-    send(sock, hello, strlen(hello), 0);
-    printf("클라이언트가 서버에게 메시지를 보냈습니다.\n");
+    // 4. 데이터 전송 및 수신 루프
+    while(1) {
+        // 사용자 입력 받기
+        get_client_input(wins.send_win, buffer, BUF_SIZE);
 
-    // 5. 데이터 수신 및 출력
-    valread = read(sock, buffer, 1024);
-    printf("서버로부터 받은 메시지: %s\n", buffer);
+        if (strcmp(buffer, "exit") == 0) {
+            send(sock, buffer, strlen(buffer), 0);
+            break;
+        }
 
-    // 6. 소켓 종료
+        // 서버로 데이터 전송
+        send(sock, buffer, strlen(buffer), 0);
+
+        // 서버로부터 응답 받기
+        valread = read(sock, buffer, BUF_SIZE - 1);
+        if (valread > 0) {
+            buffer[valread] = '\0';
+            display_chat_message(wins.recv_win, "서버", buffer);
+        } else {
+            display_chat_message(wins.recv_win, "시스템", "서버와의 연결이 끊겼습니다.");
+            break;
+        }
+    }
+
+    // 5. 소켓 종료 및 TUI 정리
     close(sock);
+    cleanup_client_tui();
 
     return 0;
 }
