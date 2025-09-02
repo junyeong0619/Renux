@@ -121,7 +121,7 @@ int main() {
             display_server_log("클라이언트 로그인 실패: 잘못된 형식 수신.");
         }
     }
-    
+
     server_cleanup(new_socket, server_fd, username);
 
     return 0;
