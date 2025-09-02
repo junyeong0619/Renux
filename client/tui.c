@@ -26,7 +26,7 @@ void init_client_tui(ChatWindows *wins) {
 
     wins->send_win = newwin(3, max_x, max_y - 3, 0);
     box(wins->send_win, 0, 0);
-    mvwprintw(wins->send_win, 1, 1, "input: ");
+    mvwprintw(wins->send_win, 1, 1, "input:   ");
     wrefresh(wins->send_win);
 }
 
