@@ -69,13 +69,13 @@ void start_chat_service(int client_socket) {
     while(1) {
         valread = read(client_socket, buffer, BUF_SIZE - 1);
         if (valread <= 0) {
-            display_server_log("클라이언트 연결이 끊어졌습니다.");
+            display_server_log("client disconnected.");
             break;
         }
         buffer[valread] = '\0';
 
         if (strcmp(buffer, "exit") == 0) {
-            display_server_log("클라이언트가 채팅을 종료했습니다.");
+            display_server_log("client disconnected.");
             break;
         }
 
@@ -100,13 +100,13 @@ void start_chat_service(int client_socket) {
         }
 
         char log_message[BUF_SIZE + 50];
-        snprintf(log_message, sizeof(log_message), "클라이언트로부터 받은 메시지: %s", buffer);
+        snprintf(log_message, sizeof(log_message), "message from client: %s", buffer);
         display_server_log(log_message);
 
         get_server_input(send_buffer, BUF_SIZE);
         if (strlen(send_buffer) > 0) {
             send(client_socket, send_buffer, strlen(send_buffer), 0);
-            display_server_log("서버가 클라이언트에게 메시지를 보냈습니다.");
+            display_server_log("server sent message to client.");
         }
     }
 }
