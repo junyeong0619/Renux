@@ -6,6 +6,8 @@ set(CMAKE_C_STANDARD 99)
 add_executable(server
         server/server.c
         server/tui.c
+        server/service.c
+        server/service.h
 )
 target_link_libraries(server -lncurses)
 
