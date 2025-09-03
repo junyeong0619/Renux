@@ -12,7 +12,6 @@
 #include <pthread.h>
 #include "tui.h"
 
-#define PORT 8080
 #define BUF_SIZE 1024
 
 typedef struct {
@@ -44,13 +43,22 @@ void *receive_handler(void *args) {
     return 0;
 }
 
-
-int main() {
+// ./client_e  ipaddr port
+int main(int argc, char *argv[]) {
     int sock = 0;
     ssize_t valread;
     struct sockaddr_in serv_addr;
     char buffer[BUF_SIZE] = {0};
     ChatWindows wins;
+    char *ipaddr, *port;
+
+    //set ipaddress and port for connecting
+    if (argc == 3) {
+        ipaddr = argv[1];
+        port = argv[2];
+    }else {
+        exit(0);
+    }
 
     init_client_tui(&wins);
 
@@ -61,9 +69,9 @@ int main() {
     }
 
     serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(PORT);
+    serv_addr.sin_port = htons(atoi(port));
 
-    if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
+    if (inet_pton(AF_INET, ipaddr, &serv_addr.sin_addr) <= 0) {
         display_chat_message(wins.recv_win, "error", "invalid ip address.");
         cleanup_client_tui();
         exit(EXIT_FAILURE);
