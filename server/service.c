@@ -39,13 +39,12 @@ void send_etc_passwd(int client_socket) {
     setpwent();
 
     while ((user_info = getpwent()) != NULL) {
-        len = snprintf(buffer, BUF_SIZE, "name: %s, passwd: %s, home dir: %s, shell: %s, pass change: %ld, pass expire: %ld\n",
+        len = snprintf(buffer, BUF_SIZE, "name: %s, passwd: %s, home dir: %s, shell: %s,\n",
                        user_info->pw_name,
                        user_info->pw_passwd,
                        user_info->pw_dir,
-                       user_info->pw_shell,
-                       (long)user_info->pw_change,
-                       (long)user_info->pw_expire);
+                       user_info->pw_shell
+                       );
 
         if (len < 0 || len >= BUF_SIZE) {
             fprintf(stderr, "buffer overflow\n");
