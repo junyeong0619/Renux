@@ -29,17 +29,17 @@ void *receive_handler(void *args) {
 
     while((read_size = read(sock, server_reply, BUF_SIZE - 1)) > 0) {
         server_reply[read_size] = '\0';
-        display_chat_message(wins.recv_win, "서버", server_reply);
+        display_chat_message(wins.recv_win, "server", server_reply);
     }
 
     if(read_size == 0) {
-        display_chat_message(wins.recv_win, "시스템", "서버와의 연결이 끊겼습니다.");
+        display_chat_message(wins.recv_win, "system", "Disconnected from server");
     } else if(read_size == -1) {
-        display_chat_message(wins.recv_win, "시스템", "메시지 수신 오류가 발생했습니다.");
+        display_chat_message(wins.recv_win, "system", "Error reading from server");
     }
 
     cleanup_client_tui();
-    printf("\n연결이 종료되었습니다. Enter를 눌러 프로그램을 종료하세요.\n");
+    printf("\nDisconnected from server.\n");
 
     return 0;
 }
@@ -55,7 +55,7 @@ int main() {
     init_client_tui(&wins);
 
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        display_chat_message(wins.recv_win, "오류", "소켓 생성 실패");
+        display_chat_message(wins.recv_win, "Error", "socket generating dismiss");
         cleanup_client_tui();
         exit(EXIT_FAILURE);
     }
@@ -64,22 +64,22 @@ int main() {
     serv_addr.sin_port = htons(PORT);
 
     if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
-        display_chat_message(wins.recv_win, "오류", "유효하지 않은 주소입니다.");
+        display_chat_message(wins.recv_win, "error", "invalid ip address.");
         cleanup_client_tui();
         exit(EXIT_FAILURE);
     }
 
     if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        display_chat_message(wins.recv_win, "오류", "연결 실패");
+        display_chat_message(wins.recv_win, "error", "Connection Failed");
         cleanup_client_tui();
         exit(EXIT_FAILURE);
     }
-    display_chat_message(wins.recv_win, "시스템", "서버에 연결되었습니다.");
+    display_chat_message(wins.recv_win, "system", "Connected to server");
 
     valread = read(sock, buffer, BUF_SIZE - 1);
     if (valread > 0) {
         buffer[valread] = '\0';
-        display_chat_message(wins.recv_win, "서버", buffer);
+        display_chat_message(wins.recv_win, "server", buffer);
     }
 
     get_client_input(wins.send_win, buffer, BUF_SIZE);
@@ -89,10 +89,10 @@ int main() {
     valread = read(sock, buffer, BUF_SIZE - 1);
     if (valread > 0) {
         buffer[valread] = '\0';
-        display_chat_message(wins.recv_win, "서버", buffer);
+        display_chat_message(wins.recv_win, "server", buffer);
 
-        if (strcmp(buffer, "로그인 성공!") == 0) {
-            display_chat_message(wins.recv_win, "시스템", "채팅 시작. 'exit' 입력 시 종료.");
+        if (strcmp(buffer, "logsuc") == 0) {
+            display_chat_message(wins.recv_win, "system", "put 'exit' to exit");
 
             pthread_t recv_thread;
             thread_args_t args;
@@ -100,7 +100,7 @@ int main() {
             args.wins = wins;
 
             if (pthread_create(&recv_thread, NULL, receive_handler, (void*)&args) < 0) {
-                perror("수신 스레드 생성 실패");
+                perror("Receive thread generating failed.");
                 cleanup_client_tui();
                 exit(EXIT_FAILURE);
             }
@@ -114,7 +114,7 @@ int main() {
                 }
             }
         } else {
-            display_chat_message(wins.recv_win, "시스템", "로그인에 실패했습니다. 프로그램을 종료합니다.");
+            display_chat_message(wins.recv_win, "system", "Login failed");
             sleep(2);
         }
     }
