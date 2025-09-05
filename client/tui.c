@@ -7,7 +7,6 @@
 #include <locale.h>
 #include <string.h>
 
-static int recv_row = 1;
 
 void init_client_tui(ChatWindows *wins) {
     setlocale(LC_ALL, "ko_KR.UTF-8");
@@ -21,6 +20,10 @@ void init_client_tui(ChatWindows *wins) {
     getmaxyx(stdscr, max_y, max_x);
 
     wins->recv_win = newwin(max_y - 3, max_x, 0, 0);
+
+    //scroll page when the page going to be full
+    scrollok(wins->recv_win, TRUE);
+
     box(wins->recv_win, 0, 0);
     wrefresh(wins->recv_win);
 
@@ -31,7 +34,10 @@ void init_client_tui(ChatWindows *wins) {
 }
 
 void display_chat_message(WINDOW *win, const char *sender, const char *message) {
-    mvwprintw(win, recv_row++, 1, "[%s] %s", sender, message);
+    wprintw(win, "\n [%s] %s", sender, message);
+
+    box(win, 0, 0);
+
     wrefresh(win);
 }
 
