@@ -8,7 +8,6 @@
 
 static WINDOW *log_win;
 static WINDOW *input_win;
-static int log_row = 1;
 
 void init_server_tui() {
     setlocale(LC_ALL, "ko_KR.UTF-8");
@@ -21,6 +20,9 @@ void init_server_tui() {
     getmaxyx(stdscr, max_y, max_x);
 
     log_win = newwin(max_y - 3, max_x, 0, 0);
+
+    scrollok(log_win, TRUE);
+
     box(log_win, 0, 0);
     wrefresh(log_win);
 
@@ -31,7 +33,10 @@ void init_server_tui() {
 }
 
 void display_server_log(const char *log_msg) {
-    mvwprintw(log_win, log_row++, 1, "%s", log_msg);
+    wprintw(log_win, "\n %s", log_msg);
+
+    box(log_win, 0, 0);
+
     wrefresh(log_win);
 }
 
