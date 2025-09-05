@@ -101,11 +101,5 @@ void start_chat_service(int client_socket) {
         char log_message[BUF_SIZE + 50];
         snprintf(log_message, sizeof(log_message), "message from client: %s", buffer);
         display_server_log(log_message);
-
-        get_server_input(send_buffer, BUF_SIZE);
-        if (strlen(send_buffer) > 0) {
-            send(client_socket, send_buffer, strlen(send_buffer), 0);
-            display_server_log("server sent message to client.");
-        }
     }
 }
