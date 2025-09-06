@@ -98,6 +98,23 @@ void start_chat_service(int client_socket) {
             send_etc_passwd(client_socket);
         }
 
+        if (strcmp(buffer, "get_users") == 0) {
+            FILE *pipe;
+            char line[BUF_SIZE];
+
+            pipe = popen("awk -F: '{print $1}' /etc/passwd", "r");
+            if (pipe == NULL) {
+                perror("popen failed");
+                send(client_socket, "ERROR\n", 6, 0);
+            } else {
+                while (fgets(line, sizeof(line), pipe) != NULL) {
+                    send(client_socket, line, strlen(line), 0);
+                }
+                pclose(pipe);
+            }
+            send(client_socket, "END_OF_LIST\n", 12, 0);
+        }
+
         char log_message[BUF_SIZE + 50];
         snprintf(log_message, sizeof(log_message), "message from client: %s", buffer);
         display_server_log(log_message);
