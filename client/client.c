@@ -26,7 +26,7 @@ typedef struct {
 } thread_args_t;
 
 
-void *receive_handler(void *args) {
+static void *receive_handler(void *args) {
     thread_args_t *thread_args = (thread_args_t *)args;
     int sock = thread_args->sock;
     ChatWindows wins = thread_args->wins;

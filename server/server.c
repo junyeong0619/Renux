@@ -14,7 +14,7 @@
 #define PORT 8080
 #define BUF_SIZE 1024
 
-void generate_socket(int *server_fd) {
+static void generate_socket(int *server_fd) {
     if ((*server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         display_server_log("Error: Socket generating failed");
         cleanup_server_tui();
@@ -22,13 +22,13 @@ void generate_socket(int *server_fd) {
     }
 }
 
-void get_server_password(char *server_passwd) {
+static void get_server_password(char *server_passwd) {
     display_server_log("Set the password for Client accepting.");
     get_server_input(server_passwd, BUF_SIZE);
     display_server_log("Password save completed.");
 }
 
-void server_cleanup(int new_socket, int server_fd, char *username) {
+static void server_cleanup(int new_socket, int server_fd, char *username) {
     close(new_socket);
     close(server_fd);
 

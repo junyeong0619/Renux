@@ -120,7 +120,7 @@ int show_user_menu(char **choices, int n_choices) {
 
         offset = ((highlight - 1) / items_per_page) * items_per_page;
 
-        werase(menu_win); 
+        werase(menu_win);
         print_menu(menu_win, highlight, offset, items_per_page, n_choices, choices);
 
         if (choice != 0)
