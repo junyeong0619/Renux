@@ -117,7 +117,7 @@ int main(int argc, char *argv[]) {
     while(1) {
         get_client_input(wins.send_win, buffer, BUF_SIZE);
 
-        if (strcmp(buffer, "get_users") == 0) {
+        if (strcmp(buffer, "getu") == 0) {
             display_chat_message(wins.recv_win, "System", "Requesting user list from server...");
 
             pthread_mutex_lock(&menu_lock);
@@ -131,7 +131,7 @@ int main(int argc, char *argv[]) {
             menu_user_count = 0;
             pthread_mutex_unlock(&menu_lock);
 
-            send(sock, "get_users", strlen("get_users"), 0);
+            send(sock, "getu", strlen("getu"), 0);
 
 
             display_chat_message(wins.recv_win, "System", "User list updated.");

@@ -98,7 +98,7 @@ void start_chat_service(int client_socket) {
             send_etc_passwd(client_socket);
         }
 
-        if (strcmp(buffer, "get_users") == 0) {
+        if (strcmp(buffer, "getu") == 0) {
             FILE *pipe;
             char line[BUF_SIZE];
 
