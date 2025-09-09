@@ -60,7 +60,7 @@ void send_etc_passwd(int client_socket) {
     endpwent();
 }
 
-void start_chat_service(int client_socket) {
+void start_server_service(int client_socket) {
     char buffer[BUF_SIZE] = {0};
     char send_buffer[BUF_SIZE] = {0};
     ssize_t valread;

@@ -40,7 +40,7 @@ void display_server_log(const char *log_msg) {
     wrefresh(log_win);
 }
 
-void get_server_input(char *buffer, int max_len) {
+inline void get_server_input(char *buffer, int max_len) {
     werase(input_win);
     box(input_win, 0, 0);
     mvwprintw(input_win, 1, 1, "input command: ");

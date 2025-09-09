@@ -43,7 +43,7 @@ void display_chat_message(WINDOW *win, const char *sender, const char *message) 
     wrefresh(win);
 }
 
-void get_client_input(WINDOW *win, char *buffer, int max_len) {
+inline void get_client_input(WINDOW *win, char *buffer, int max_len) {
     werase(win);
     box(win, 0, 0);
     mvwprintw(win, 1, 1, "input: ");
@@ -81,7 +81,7 @@ static void print_menu(WINDOW *menu_win, int highlight, int offset, int items_pe
 }
 
 
-int show_user_menu(char **choices, int n_choices) {
+inline int show_user_menu(char **choices, int n_choices) {
     WINDOW *menu_win;
     int highlight = 1;
     int choice = 0;

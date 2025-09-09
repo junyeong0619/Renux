@@ -12,8 +12,11 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include "tui.h"
+#include "../server/service.h"
 
 #define BUF_SIZE 1024
+#define likely(x)   __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
 
 volatile bool is_menu_mode = false;
 char **menu_user_list = NULL;
@@ -78,6 +81,53 @@ static void *receive_handler(void *args) {
     return 0;
 }
 
+static void get_users_handler(ChatWindows *wins, int sock) {
+    display_chat_message(wins->recv_win, "System", "Requesting user list from server...");
+
+    pthread_mutex_lock(&menu_lock);
+    if (menu_user_list != NULL) {
+        for (int i = 0; i < menu_user_count; i++) free(menu_user_list[i]);
+        free(menu_user_list);
+    }
+
+    is_menu_mode = true;
+    menu_user_list = NULL;
+    menu_user_count = 0;
+    pthread_mutex_unlock(&menu_lock);
+
+    send(sock, "getu", strlen("getu"), 0);
+
+
+    display_chat_message(wins->recv_win, "System", "User list updated.");
+}
+
+static void manage_user_functions();
+
+static void manage_users_handler(ChatWindows *wins) {
+    pthread_mutex_lock(&menu_lock);
+    if (menu_user_list != NULL && menu_user_count > 0) {
+
+
+        is_menu_mode = false;
+        pthread_mutex_unlock(&menu_lock);
+
+        int choice = show_user_menu(menu_user_list, menu_user_count);
+        char *selected_user = menu_user_list[choice - 1];
+
+        //todo make function of selected users
+        //manage_user_functions();
+
+        char msg[100];
+        snprintf(msg, sizeof(msg), "Selected: %s", selected_user);
+
+        display_chat_message(wins->recv_win, "System", msg);
+
+    } else {
+        pthread_mutex_unlock(&menu_lock);
+        display_chat_message(wins->recv_win, "System", "User list is empty. Please run 'get_users' first.");
+    }
+}
+
 
 int main(int argc, char *argv[]) {
     int sock = 0;
@@ -90,7 +140,7 @@ int main(int argc, char *argv[]) {
         ipaddr = argv[1];
         port = argv[2];
     } else {
-        printf("Usage: <ip_address> <port>\n");
+        printf("Input format in ./client <ipaddress> <port> \n");
     }
 
     init_client_tui(&wins);
@@ -108,7 +158,8 @@ int main(int argc, char *argv[]) {
     args.sock = sock;
     args.wins = wins;
 
-    if (pthread_create(&recv_thread, NULL, receive_handler, (void*)&args) < 0) {
+    //receiving thread creating
+    if (likely(pthread_create(&recv_thread, NULL, receive_handler, (void*)&args) < 0)) {
         perror("Thread creation failed");
         cleanup_client_tui();
         exit(EXIT_FAILURE);
@@ -118,48 +169,14 @@ int main(int argc, char *argv[]) {
         get_client_input(wins.send_win, buffer, BUF_SIZE);
 
         if (strcmp(buffer, "getu") == 0) {
-            display_chat_message(wins.recv_win, "System", "Requesting user list from server...");
-
-            pthread_mutex_lock(&menu_lock);
-            if (menu_user_list != NULL) {
-                for (int i = 0; i < menu_user_count; i++) free(menu_user_list[i]);
-                free(menu_user_list);
-            }
-
-            is_menu_mode = true;
-            menu_user_list = NULL;
-            menu_user_count = 0;
-            pthread_mutex_unlock(&menu_lock);
-
-            send(sock, "getu", strlen("getu"), 0);
-
-
-            display_chat_message(wins.recv_win, "System", "User list updated.");
+            get_users_handler(&wins, sock);
             continue;
-        } else if (strcmp(buffer, "manage") == 0) {
-            pthread_mutex_lock(&menu_lock);
-            if (menu_user_list != NULL && menu_user_count > 0) {
+        }
 
-
-                is_menu_mode = false;
-                pthread_mutex_unlock(&menu_lock);
-
-                int choice = show_user_menu(menu_user_list, menu_user_count);
-                char *selected_user = menu_user_list[choice - 1];
-
-                //todo make function of selected users
-
-                char msg[100];
-                snprintf(msg, sizeof(msg), "Selected: %s", selected_user);
-
-                display_chat_message(wins.recv_win, "System", msg);
-
-            } else {
-                pthread_mutex_unlock(&menu_lock);
-                display_chat_message(wins.recv_win, "System", "User list is empty. Please run 'get_users' first.");
-            }
+        if (strcmp(buffer, "manage") == 0) {
+           manage_users_handler(&wins);
             continue;
-        } else {
+        } else{
             send(sock, buffer, strlen(buffer), 0);
         }
 
@@ -168,6 +185,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    //socket close and program exiting
     close(sock);
     cleanup_client_tui();
     return 0;

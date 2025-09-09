@@ -11,7 +11,7 @@
 char *get_username(void);
 int is_valid_login(char *username, char *passwd, char *server_passwd);
 void execute_command(char *command);
-void start_chat_service(int client_socket);
+void start_server_service(int client_socket);
 
 
 
