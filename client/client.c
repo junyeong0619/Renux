@@ -101,9 +101,12 @@ static void get_users_handler(ChatWindows *wins, int sock) {
     display_chat_message(wins->recv_win, "System", "User list updated.");
 }
 
-static void manage_user_functions();
+static int manage_user_functions() {
+    return user_manage_function_selections();
+};
 
 static void manage_users_handler(ChatWindows *wins) {
+    int selection = 0;
     pthread_mutex_lock(&menu_lock);
     if (menu_user_list != NULL && menu_user_count > 0) {
 
@@ -113,12 +116,11 @@ static void manage_users_handler(ChatWindows *wins) {
 
         int choice = show_user_menu(menu_user_list, menu_user_count);
         char *selected_user = menu_user_list[choice - 1];
-
-        //todo make function of selected users
-        //manage_user_functions();
+        
+        selection = manage_user_functions();
 
         char msg[100];
-        snprintf(msg, sizeof(msg), "Selected: %s", selected_user);
+        snprintf(msg, sizeof(msg), "Selected: %s number: %d", selected_user, selection+1);
 
         display_chat_message(wins->recv_win, "System", msg);
 

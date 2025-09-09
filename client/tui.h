@@ -16,5 +16,6 @@ void display_chat_message(WINDOW *win, const char *sender, const char *message);
 void get_client_input(WINDOW *win, char *buffer, int max_len);
 void cleanup_client_tui();
 int show_user_menu(char **choices, int n_choices);
+int user_manage_function_selections();
 
 #endif //TUI_H

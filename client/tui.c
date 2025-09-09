@@ -81,7 +81,7 @@ static void print_menu(WINDOW *menu_win, int highlight, int offset, int items_pe
 }
 
 
-inline int show_user_menu(char **choices, int n_choices) {
+int show_user_menu(char **choices, int n_choices) {
     WINDOW *menu_win;
     int highlight = 1;
     int choice = 0;
@@ -125,6 +125,71 @@ inline int show_user_menu(char **choices, int n_choices) {
 
         if (choice != 0)
             break;
+    }
+
+    delwin(menu_win);
+    touchwin(stdscr);
+    refresh();
+
+    return choice;
+}
+
+int user_manage_function_selections() {
+    WINDOW *menu_win;
+    int highlight = 0;
+    int choice = -1;
+    int c;
+
+    char *choices[] = {
+        "Sample 1",
+        "Sample 2",
+        "Sample 3"
+    };
+    int n_choices = 3;
+
+    clear();
+    mvprintw(0, 0, "Select an action. (Enter to confirm, 'q' to cancel)");
+    refresh();
+
+    int menu_height = n_choices + 4;
+    int menu_width = MENU_WIDTH;
+    int starty = (LINES - menu_height) / 2;
+    int startx = (COLS - menu_width) / 2;
+    menu_win = newwin(menu_height, menu_width, starty, startx);
+    keypad(menu_win, TRUE);
+
+    while (1) {
+        box(menu_win, 0, 0);
+        for (int i = 0; i < n_choices; ++i) {
+            if (highlight == i) {
+                wattron(menu_win, A_REVERSE);
+                mvwprintw(menu_win, i + 2, 2, "%s", choices[i]);
+                wattroff(menu_win, A_REVERSE);
+            } else {
+                mvwprintw(menu_win, i + 2, 2, "%s", choices[i]);
+            }
+        }
+        wrefresh(menu_win);
+
+        c = wgetch(menu_win);
+        switch (c) {
+            case KEY_UP:
+                highlight = (highlight == 0) ? n_choices - 1 : highlight - 1;
+            break;
+            case KEY_DOWN:
+                highlight = (highlight == n_choices - 1) ? 0 : highlight + 1;
+            break;
+            case 10:
+                choice = highlight;
+            break;
+            case 'q':
+                choice = -1;
+            break;
+        }
+
+        if (choice != -1) {
+            break;
+        }
     }
 
     delwin(menu_win);
