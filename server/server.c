@@ -60,7 +60,7 @@ static void login_process(char *get_user_name, char *password, char *server_pass
 }
 
 static void safe_log_message_concat(char *message, char *string,   char *buffer) {
-    snprintf(buffer, sizeof(buffer), string, message);
+    snprintf(buffer, BUF_SIZE, string, message);
     display_server_log(buffer);
 }
 

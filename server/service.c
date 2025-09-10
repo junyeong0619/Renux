@@ -3,6 +3,9 @@
 //
 
 #include "service.h"
+
+#include <math.h>
+
 #include "tui.h"
 #include <unistd.h>
 #include <string.h>
@@ -10,6 +13,11 @@
 #include <pwd.h>
 
 #define BUF_SIZE 1024
+
+static void safe_log_message_concat(char *message, char *string,   char *buffer) {
+    snprintf(buffer, BUF_SIZE , string, message);
+    display_server_log(buffer);
+}
 
 char *get_username(void) {
     char *username = getlogin();
@@ -63,6 +71,7 @@ void send_etc_passwd(int client_socket) {
 void start_server_service(int client_socket) {
     char buffer[BUF_SIZE] = {0};
     char send_buffer[BUF_SIZE] = {0};
+    char log_message[BUF_SIZE+100] = {0};
     ssize_t valread;
 
     while(1) {
@@ -104,22 +113,22 @@ void start_server_service(int client_socket) {
             char line[BUF_SIZE];
 
             //todo 데이터전송시 암호화 필요
-
+            display_server_log("Server started command getu");
             pipe = popen("awk -F: '{print $1}' /etc/passwd", "r");
+            display_server_log("pipe opened with \" awk -F: '{print $1}' /etc/passwd \"");
             if (pipe == NULL) {
                 perror("popen failed");
                 send(client_socket, "ERROR\n", 6, 0);
             } else {
                 while (fgets(line, sizeof(line), pipe) != NULL) {
+                    safe_log_message_concat("server:", line, log_message);
                     send(client_socket, line, strlen(line), 0);
                 }
                 pclose(pipe);
             }
             send(client_socket, "END_OF_LIST\n", 12, 0);
+            display_server_log("Get user method end");
         }
-
-        char log_message[BUF_SIZE + 50];
-        snprintf(log_message, sizeof(log_message), "message from client: %s", buffer);
-        display_server_log(log_message);
+        safe_log_message_concat(buffer, "message from client: %s",log_message);
     }
 }
