@@ -6,6 +6,7 @@
 #include <string.h>
 #include <locale.h>
 
+static WINDOW *log_win_border;
 static WINDOW *log_win;
 static WINDOW *input_win;
 
@@ -19,12 +20,12 @@ void init_server_tui() {
     int max_y, max_x;
     getmaxyx(stdscr, max_y, max_x);
 
-    log_win = newwin(max_y - 3, max_x, 0, 0);
+    log_win_border = newwin(max_y - 3, max_x, 0, 0);
+    box(log_win_border, 0, 0);
+    wrefresh(log_win_border);
 
+    log_win = newwin(max_y - 5, max_x - 2, 1, 1);
     scrollok(log_win, TRUE);
-
-    box(log_win, 0, 0);
-    wrefresh(log_win);
 
     input_win = newwin(3, max_x, max_y - 3, 0);
     box(input_win, 0, 0);
@@ -34,9 +35,6 @@ void init_server_tui() {
 
 void display_server_log(const char *log_msg) {
     wprintw(log_win, "\n %s", log_msg);
-
-    box(log_win, 0, 0);
-
     wrefresh(log_win);
 }
 
