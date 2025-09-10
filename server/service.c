@@ -98,9 +98,12 @@ void start_server_service(int client_socket) {
             send_etc_passwd(client_socket);
         }
 
+        //todo 실시간 작업 현황 보고필요
         if (strcmp(buffer, "getu") == 0) {
             FILE *pipe;
             char line[BUF_SIZE];
+
+            //todo 데이터전송시 암호화 필요
 
             pipe = popen("awk -F: '{print $1}' /etc/passwd", "r");
             if (pipe == NULL) {

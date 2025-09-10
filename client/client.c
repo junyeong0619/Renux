@@ -116,7 +116,7 @@ static void manage_users_handler(ChatWindows *wins) {
 
         int choice = show_user_menu(menu_user_list, menu_user_count);
         char *selected_user = menu_user_list[choice - 1];
-        
+
         selection = manage_user_functions();
 
         char msg[100];

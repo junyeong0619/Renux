@@ -2,6 +2,8 @@
 // Created by Junyeong on 2025. 9. 2..
 //
 #include "server.h"
+
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,12 +58,19 @@ static void login_process(char *get_user_name, char *password, char *server_pass
         display_server_log("Could not login.");
     }
 }
+
+static void safe_log_message_concat(char *message, char *string,   char *buffer) {
+    snprintf(buffer, sizeof(buffer), string, message);
+    display_server_log(buffer);
+}
+
 int main() {
     int server_fd, new_socket;
     ssize_t valread;
     struct sockaddr_in address;
     int addrlen = sizeof(address);
     char buffer[BUF_SIZE] = {0};
+    char log_message[BUF_SIZE + 100];
     char *username;
 
     //기본정보 초기화
@@ -70,7 +79,7 @@ int main() {
     init_server_tui();
 
     generate_socket(&server_fd);
-
+    display_server_log("Server socket generated");
 
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
@@ -81,14 +90,16 @@ int main() {
         cleanup_server_tui();
         exit(EXIT_FAILURE);
     }
+    display_server_log("Server binding succeeded");
 
     if (likely(listen(server_fd, 3) < 0)) {
         display_server_log("Error: Listening failed");
         cleanup_server_tui();
         exit(EXIT_FAILURE);
     }
+    display_server_log("Server Listening succeeded Waiting for client connection...");
 
-    display_server_log(strcat(username,"now opened server."));
+    safe_log_message_concat(username, "\tnow opened server.",log_message);
 
     char server_passwd[BUF_SIZE];
     get_server_password(server_passwd);
@@ -99,25 +110,31 @@ int main() {
         cleanup_server_tui();
         exit(EXIT_FAILURE);
     }
+    display_server_log("Server accepting client...");
 
     display_server_log("Connection established.");
 
     const char *login_msg = "Put the login information in this form: username,password";
     send(new_socket, login_msg, strlen(login_msg), 0);
 
+    display_server_log("Server waiting for client's input...");
     valread = read(new_socket, buffer, BUF_SIZE - 1);
-
     if (likely(valread > 0)) {
         buffer[valread] = '\0';
 
         char data[BUF_SIZE];
         strcpy(data, buffer);
 
+        safe_log_message_concat(data, "Server received a response from client.\nclient's original response:\t%s", log_message);
+
         char *get_user_name = strtok(data, ",");
         char *password = strtok(NULL, ",\n");
+        safe_log_message_concat(get_user_name,"Server get username from response:\t",log_message);
+        safe_log_message_concat(password,"Server get password from response:\t",log_message);
 
         if (username != NULL && password != NULL) {
             login_process(get_user_name, password, server_passwd, new_socket);
+            display_server_log("Server login succeeded.");
         } else {
             const char *failure_msg = "Login failed. incorrect form error";
             send(new_socket, failure_msg, strlen(failure_msg), 0);
