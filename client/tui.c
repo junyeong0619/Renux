@@ -10,9 +10,20 @@
 #define MENU_WIDTH 40
 
 
+
 void init_client_tui(ChatWindows *wins) {
     setlocale(LC_ALL, "ko_KR.UTF-8");
     initscr();
+
+    if (has_colors() == FALSE) {
+        endwin();
+        printf("Your terminal does not support color\n");
+        exit(1);
+    }
+    start_color();
+    init_pair(1, COLOR_YELLOW, COLOR_BLUE);
+    init_pair(2, COLOR_CYAN, COLOR_BLACK);
+
     cbreak();
     echo();
     keypad(stdscr, TRUE);
@@ -36,10 +47,20 @@ void init_client_tui(ChatWindows *wins) {
 }
 
 void display_chat_message(WINDOW *win, const char *sender, const char *message) {
+    if (strcmp(sender, "system") == 0) {
+        wattron(win, COLOR_PAIR(1));
+    } else if (strcmp(sender, "server") == 0) {
+        wattron(win, COLOR_PAIR(2));
+    }
+
     wprintw(win, "\n [%s] %s", sender, message);
 
+    if (strcmp(sender, "system") == 0) {
+        wattroff(win, COLOR_PAIR(1));
+    } else if (strcmp(sender, "server") == 0) {
+        wattroff(win, COLOR_PAIR(2));
+    }
     box(win, 0, 0);
-
     wrefresh(win);
 }
 

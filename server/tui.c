@@ -5,6 +5,7 @@
 #include "tui.h"
 #include <string.h>
 #include <locale.h>
+#include <stdlib.h>
 
 static WINDOW *log_win_border;
 static WINDOW *log_win;
@@ -13,6 +14,15 @@ static WINDOW *input_win;
 void init_server_tui() {
     setlocale(LC_ALL, "ko_KR.UTF-8");
     initscr();
+
+    if (has_colors() == FALSE) {
+        endwin();
+        printf("Your terminal does not support color\n");
+        exit(1);
+    }
+    start_color();
+    init_pair(1, COLOR_WHITE, COLOR_BLUE);
+
     cbreak();
     echo();
     keypad(stdscr, TRUE);
@@ -34,7 +44,9 @@ void init_server_tui() {
 }
 
 void display_server_log(const char *log_msg) {
+    wattron(log_win, COLOR_PAIR(1));
     wprintw(log_win, "\n %s", log_msg);
+    wattroff(log_win, COLOR_PAIR(1));
     wrefresh(log_win);
 }
 
