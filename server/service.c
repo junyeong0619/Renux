@@ -88,6 +88,34 @@ void start_server_service(int client_socket) {
             break;
         }
         buffer[valread] = '\0';
+        if(strchr(buffer,':')) {
+            display_server_log(buffer);
+            display_server_log("server getinfo method started");
+            char *username = strtok(buffer, ":");
+            char *method = strtok(NULL, ":");
+            if (strcmp(method,"getinfo")==0) {
+                struct passwd *user_info = getpwnam(username);
+                if (user_info == NULL) {
+                    display_server_log("user not found");
+                }else {
+                    snprintf(log_message, BUF_SIZE,
+                     "\n---- User Info: %s ----\n"
+                     "  UID   : %u\n"
+                     "  GID   : %u\n"
+                     "  Home : %s\n"
+                     "  Shell: %s\n"
+                     "----------------------",
+                     user_info->pw_name,
+                     user_info->pw_uid,
+                     user_info->pw_gid,
+                     user_info->pw_dir,
+                     user_info->pw_shell);
+
+                    send(client_socket, log_message, strlen(log_message), 0);
+                    display_server_log("User info sent to client.");
+                }
+            }
+        }
 
         if (strcmp(buffer, "exit") == 0) {
             display_server_log("client disconnected.");
