@@ -11,6 +11,8 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <pwd.h>
+#include "../utils/ssl_utils.h"
+
 
 #define BUF_SIZE 1024
 
@@ -26,18 +28,23 @@ char *get_username(void) {
     return return_username;
 }
 
-int is_valid_login(char *username,char *passwd, char *server_passwd) {
-    if (username == NULL)
+int is_valid_login(char *username, char *passwd, unsigned long server_passwd_hashed) {
+    if (username == NULL || passwd == NULL)
         return -1;
+
     char *target_username = get_username();
-    if (strcmp(username, target_username) == 0) {
-        free(target_username);
-        if (strcmp(server_passwd,passwd) == 0) {
+    int is_user_valid = (strcmp(username, target_username) == 0);
+    free(target_username);
+
+    if (is_user_valid) {
+        unsigned long incoming_passwd_hashed = hash_string(passwd);
+        if (server_passwd_hashed == incoming_passwd_hashed) {
             return 0;
         }
     }
     return -1;
 }
+
 
 void send_etc_passwd(int client_socket) {
     struct passwd *user_info;

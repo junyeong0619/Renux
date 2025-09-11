@@ -12,6 +12,7 @@
 #include <netinet/in.h>
 #include "tui.h"
 #include "service.h"
+#include "../utils/ssl_utils.h"
 
 #define PORT 8080
 #define BUF_SIZE 1024
@@ -44,7 +45,7 @@ static void server_cleanup(int new_socket, int server_fd, char *username) {
     free(username);
 }
 
-static void login_process(char *get_user_name, char *password, char *server_passwd, int new_socket) {
+static void login_process(char *get_user_name, char *password, unsigned long server_passwd, int new_socket) {
     if (is_valid_login(get_user_name, password,server_passwd) == 0) {
         const char *success_msg = "logsuc";
         send(new_socket, success_msg, strlen(success_msg), 0);
@@ -101,9 +102,17 @@ int main() {
 
     safe_log_message_concat(username, "\tnow opened server.",log_message);
 
-    char server_passwd[BUF_SIZE];
-    get_server_password(server_passwd);
+    //hashing server password
+    char server_passwd_plain[BUF_SIZE];
+    get_server_password(server_passwd_plain);
 
+    unsigned long server_passwd_hashed = hash_string(server_passwd_plain);
+
+    memset(server_passwd_plain, 0, sizeof(server_passwd_plain));
+
+    char hashed_msg[100];
+    snprintf(hashed_msg, sizeof(hashed_msg), "Password has been hashed. Hash: %lu", server_passwd_hashed);
+    display_server_log(hashed_msg);
 
     if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen)) < 0) {
         display_server_log("Error: Accepting failed");
@@ -129,11 +138,11 @@ int main() {
 
         char *get_user_name = strtok(data, ",");
         char *password = strtok(NULL, ",\n");
-        safe_log_message_concat(get_user_name,"Server get username from response:\t",log_message);
-        safe_log_message_concat(password,"Server get password from response:\t",log_message);
+        safe_log_message_concat(get_user_name,"Server get username from response:\t%s",log_message);
+        safe_log_message_concat(password,"Server get password from response:\t%d",log_message);
 
         if (username != NULL && password != NULL) {
-            login_process(get_user_name, password, server_passwd, new_socket);
+            login_process(get_user_name, password, server_passwd_hashed, new_socket);
             display_server_log("Server login succeeded.");
         } else {
             const char *failure_msg = "Login failed. incorrect form error";
