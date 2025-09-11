@@ -162,7 +162,7 @@ int user_manage_function_selections() {
     int c;
 
     char *choices[] = {
-        "Sample 1",
+        "Get user information",
         "Sample 2",
         "Sample 3"
     };

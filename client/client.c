@@ -105,7 +105,7 @@ static int manage_user_functions() {
     return user_manage_function_selections();
 };
 
-static void manage_users_handler(ChatWindows *wins) {
+static void manage_users_handler(ChatWindows *wins, int sock) {
     int selection = 0;
     pthread_mutex_lock(&menu_lock);
     if (menu_user_list != NULL && menu_user_count > 0) {
@@ -118,6 +118,20 @@ static void manage_users_handler(ChatWindows *wins) {
         char *selected_user = menu_user_list[choice - 1];
 
         selection = manage_user_functions();
+        switch(selection) {
+            case 0:
+            {
+                display_chat_message(wins->recv_win, "System", "switch 1 on");
+                char command_buf[BUF_SIZE];
+
+                snprintf(command_buf, sizeof(command_buf), "%s:getinfo", selected_user);
+                display_chat_message(wins->recv_win, "System", command_buf);
+
+                send(sock, command_buf, strlen(command_buf), 0);
+                break;
+            }
+            default: break;
+        }
 
         char msg[100];
         snprintf(msg, sizeof(msg), "Selected: %s number: %d", selected_user, selection+1);
@@ -176,7 +190,7 @@ int main(int argc, char *argv[]) {
         }
 
         if (strcmp(buffer, "manage") == 0) {
-           manage_users_handler(&wins);
+           manage_users_handler(&wins,sock);
             continue;
         } else{
             send(sock, buffer, strlen(buffer), 0);
