@@ -32,17 +32,17 @@ void init_client_tui(ChatWindows *wins) {
     int max_y, max_x;
     getmaxyx(stdscr, max_y, max_x);
 
-    wins->recv_win = newwin(max_y - 3, max_x, 0, 0);
 
-    //scroll page when the page going to be full
+    wins->recv_win_border = newwin(max_y - 3, max_x, 0, 0);
+    box(wins->recv_win_border, 0, 0);
+    wrefresh(wins->recv_win_border);
+
+    wins->recv_win = newwin(max_y - 5, max_x - 2, 1, 1);
     scrollok(wins->recv_win, TRUE);
-
-    box(wins->recv_win, 0, 0);
     wrefresh(wins->recv_win);
 
     wins->send_win = newwin(3, max_x, max_y - 3, 0);
-    box(wins->send_win, 0, 0);
-    mvwprintw(wins->send_win, 1, 1, "command:   ");
+    keypad(wins->send_win, TRUE);
     wrefresh(wins->send_win);
 }
 
@@ -60,14 +60,13 @@ void display_chat_message(WINDOW *win, const char *sender, const char *message) 
     } else if (strcmp(sender, "server") == 0) {
         wattroff(win, COLOR_PAIR(2));
     }
-    box(win, 0, 0);
     wrefresh(win);
 }
 
 inline void get_client_input(WINDOW *win, char *buffer, int max_len) {
     werase(win);
     box(win, 0, 0);
-    mvwprintw(win, 1, 1, "input: ");
+    mvwprintw(win, 1, 1, "com: ");
     wrefresh(win);
     mvwgetstr(win, 1, 6, buffer);
 }

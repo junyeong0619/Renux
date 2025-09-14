@@ -7,6 +7,7 @@
 #include <ncurses.h>
 
 typedef struct {
+    WINDOW *recv_win_border;
     WINDOW *recv_win;
     WINDOW *send_win;
 } ChatWindows;
