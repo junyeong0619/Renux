@@ -130,6 +130,15 @@ static void manage_users_handler(ChatWindows *wins, int sock) {
                 send(sock, command_buf, strlen(command_buf), 0);
                 break;
             }
+            case 1:
+            {
+                display_chat_message(wins->recv_win, "System", "Requesting process list from server...");
+                char command_buf[BUF_SIZE];
+                snprintf(command_buf, sizeof(command_buf), "%s:get_proc", selected_user);
+                display_chat_message(wins->recv_win, "System", command_buf);
+                send(sock, command_buf, strlen(command_buf), 0);
+                break;
+            }
             default: break;
         }
 

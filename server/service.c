@@ -114,7 +114,27 @@ void start_server_service(int client_socket) {
                     send(client_socket, log_message, strlen(log_message), 0);
                     display_server_log("User info sent to client.");
                 }
+            }else if (strcmp(method, "get_proc") == 0) {
+                display_server_log("server get_proc method started");
+                char command[BUF_SIZE];
+                snprintf(command, sizeof(command), "ps -u %s", username);
+                FILE *pipe = popen(command, "r");
+                char buf[BUF_SIZE];
+                if (pipe == NULL) {
+                    perror("pipe open error");
+                }
+
+                while (fgets(buf, BUF_SIZE, pipe) != NULL) {
+                    if (send(client_socket, buf, strlen(buf), 0) < 0) {
+                        perror("send failed");
+                        break;
+                    }
+                }
+                pclose(pipe);
+                send(client_socket, "END_OF_LIST\n", 12, 0);
+                display_server_log("Get process list method end");
             }
+
         }
 
         if (strcmp(buffer, "exit") == 0) {

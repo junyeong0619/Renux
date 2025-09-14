@@ -163,7 +163,7 @@ int user_manage_function_selections() {
 
     char *choices[] = {
         "Get user information",
-        "Sample 2",
+        "Get process list",
         "Sample 3"
     };
     int n_choices = 3;
