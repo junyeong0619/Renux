@@ -21,8 +21,12 @@ void init_client_tui(ChatWindows *wins) {
         exit(1);
     }
     start_color();
-    init_pair(1, COLOR_YELLOW, COLOR_BLUE);
-    init_pair(2, COLOR_CYAN, COLOR_BLACK);
+
+    init_pair(1, COLOR_WHITE, COLOR_BLUE);
+    init_pair(2, COLOR_WHITE, COLOR_BLUE);
+    init_pair(3, COLOR_WHITE, COLOR_BLUE);
+
+    wbkgd(stdscr, COLOR_PAIR(1));
 
     cbreak();
     echo();
@@ -35,14 +39,17 @@ void init_client_tui(ChatWindows *wins) {
 
     wins->recv_win_border = newwin(max_y - 3, max_x, 0, 0);
     box(wins->recv_win_border, 0, 0);
+    wbkgd(wins->recv_win_border, COLOR_PAIR(1));
     wrefresh(wins->recv_win_border);
 
     wins->recv_win = newwin(max_y - 5, max_x - 2, 1, 1);
     scrollok(wins->recv_win, TRUE);
+    wbkgd(wins->recv_win, COLOR_PAIR(1));
     wrefresh(wins->recv_win);
 
     wins->send_win = newwin(3, max_x, max_y - 3, 0);
     keypad(wins->send_win, TRUE);
+    wbkgd(wins->send_win, COLOR_PAIR(1));
     wrefresh(wins->send_win);
 }
 

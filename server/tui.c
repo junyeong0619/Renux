@@ -23,6 +23,8 @@ void init_server_tui() {
     start_color();
     init_pair(1, COLOR_WHITE, COLOR_BLUE);
 
+    wbkgd(stdscr, COLOR_PAIR(1));
+
     cbreak();
     echo();
     keypad(stdscr, TRUE);
@@ -32,13 +34,16 @@ void init_server_tui() {
 
     log_win_border = newwin(max_y - 3, max_x, 0, 0);
     box(log_win_border, 0, 0);
+    wbkgd(log_win_border, COLOR_PAIR(1));
     wrefresh(log_win_border);
 
     log_win = newwin(max_y - 5, max_x - 2, 1, 1);
     scrollok(log_win, TRUE);
+    wbkgd(log_win, COLOR_PAIR(1));
 
     input_win = newwin(3, max_x, max_y - 3, 0);
     box(input_win, 0, 0);
+    wbkgd(input_win, COLOR_PAIR(1));
     mvwprintw(input_win, 1, 1, "input command: ");
     wrefresh(input_win);
 }
