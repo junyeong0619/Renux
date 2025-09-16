@@ -1,6 +1,6 @@
 CC = gcc
 
-CFLAGS = -g -Wall
+CFLAGS = -g -Wall -std=c99
 
 TARGETS = server_e client_e
 
