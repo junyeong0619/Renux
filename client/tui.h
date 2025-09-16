@@ -18,5 +18,10 @@ void get_client_input(WINDOW *win, char *buffer, int max_len);
 void cleanup_client_tui();
 int show_user_menu(char **choices, int n_choices);
 int user_manage_function_selections();
+int disk_quota_menu();
+int show_filesystem_menu(char **choices, int n_choices);
+void redraw_main_tui(ChatWindows *wins);
+
+
 
 #endif //TUI_H

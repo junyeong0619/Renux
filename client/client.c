@@ -21,6 +21,11 @@
 volatile bool is_menu_mode = false;
 char **menu_user_list = NULL;
 int menu_user_count = 0;
+
+volatile bool is_fs_list_mode = false;
+char **quota_fs_list = NULL;
+int quota_fs_count = 0;
+
 pthread_mutex_t menu_lock = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct {
@@ -67,7 +72,18 @@ static void *receive_handler(void *args) {
                     menu_user_list = realloc(menu_user_list, sizeof(char*) * menu_user_count);
                     menu_user_list[menu_user_count - 1] = strdup(completed_line);
                 }
-            } else {
+            }else if (is_fs_list_mode) {
+                if (strcmp(completed_line, "END_OF_LIST") == 0) {
+                    is_fs_list_mode = false;
+                }else if (strncmp(completed_line, "ERROR:", 6) == 0) {
+                    display_chat_message(wins.recv_win, "server", completed_line);
+                } else {
+                    quota_fs_count++;
+                    quota_fs_list = realloc(quota_fs_list, sizeof(char*) * quota_fs_count);
+                    quota_fs_list[quota_fs_count - 1] = strdup(completed_line);
+                }
+            }
+            else {
                 display_chat_message(wins.recv_win, "server", completed_line);
             }
             pthread_mutex_unlock(&menu_lock);
@@ -118,11 +134,12 @@ static void manage_users_handler(ChatWindows *wins, int sock) {
         char *selected_user = menu_user_list[choice - 1];
 
         selection = manage_user_functions();
+        char command_buf[BUF_SIZE];
+
         switch(selection) {
             case 0:
             {
                 display_chat_message(wins->recv_win, "System", "switch 1 on");
-                char command_buf[BUF_SIZE];
 
                 snprintf(command_buf, sizeof(command_buf), "%s:getinfo", selected_user);
                 display_chat_message(wins->recv_win, "System", command_buf);
@@ -133,10 +150,59 @@ static void manage_users_handler(ChatWindows *wins, int sock) {
             case 1:
             {
                 display_chat_message(wins->recv_win, "System", "Requesting process list from server...");
-                char command_buf[BUF_SIZE];
                 snprintf(command_buf, sizeof(command_buf), "%s:get_proc", selected_user);
                 display_chat_message(wins->recv_win, "System", command_buf);
                 send(sock, command_buf, strlen(command_buf), 0);
+                break;
+            }
+            case 2:
+            {
+               int quota_choice = disk_quota_menu();
+            if (quota_choice == -1) break;
+
+            if (quota_choice == 0) {
+                snprintf(command_buf, sizeof(command_buf), "%s:get_quota", selected_user);
+                send(sock, command_buf, strlen(command_buf), 0);
+            } else if (quota_choice == 1) {
+                //request file system exist
+                pthread_mutex_lock(&menu_lock);
+                if (quota_fs_list != NULL) {
+                    for (int i = 0; i < quota_fs_count; i++) free(quota_fs_list[i]);
+                    free(quota_fs_list);
+                }
+                is_fs_list_mode = true;
+                quota_fs_list = NULL;
+                quota_fs_count = 0;
+                pthread_mutex_unlock(&menu_lock);
+
+                send(sock, "get_fstab_quota_list", strlen("get_fstab_quota_list"), 0);
+                display_chat_message(wins->recv_win, "System", "Fetching available filesystems...");
+
+                while (is_fs_list_mode) { sleep(1); }
+
+                if (quota_fs_count == 0) {
+                    display_chat_message(wins->recv_win, "System", "No filesystems with 'usrquota' found on server.");
+                    redraw_main_tui(wins);
+                    break;
+                }
+
+
+                int fs_choice = show_filesystem_menu(quota_fs_list, quota_fs_count);
+                if (fs_choice == 0) break;
+                char *selected_fs = quota_fs_list[fs_choice - 1];
+
+                char soft_limit[50], hard_limit[50];
+                cleanup_client_tui();
+                printf("--- Set Disk Quota for %s on %s ---\n", selected_user, selected_fs);
+                printf("Enter Soft Limit (e.g., 500M): ");
+                scanf("%49s", soft_limit);
+                printf("Enter Hard Limit (e.g., 1G): ");
+                scanf("%49s", hard_limit);
+
+                init_client_tui(wins);
+                snprintf(command_buf, sizeof(command_buf), "%s:set_quota:%s:%s:%s", selected_user, soft_limit, hard_limit, selected_fs);
+                send(sock, command_buf, strlen(command_buf), 0);
+                }
                 break;
             }
             default: break;

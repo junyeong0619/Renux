@@ -161,6 +161,67 @@ int show_user_menu(char **choices, int n_choices) {
     return choice;
 }
 
+int disk_quota_menu() {
+    WINDOW *menu_win;
+    int highlight = 0;
+    int choice = -1;
+    char *choices[] = {"View Quota", "Set Quota"};
+    int n_choices = 2;
+
+    clear();
+    mvprintw(0, 0, "Select a Quota function. (Enter to confirm, 'q' to cancel)");
+    refresh();
+
+    int menu_height = n_choices + 4;
+    int menu_width = MENU_WIDTH;
+    int starty = (LINES - menu_height) / 2;
+    int startx = (COLS - menu_width) / 2;
+    menu_win = newwin(menu_height, menu_width, starty, startx);
+    keypad(menu_win, TRUE);
+
+    while (1) {
+        box(menu_win, 0, 0);
+        for (int i = 0; i < n_choices; ++i) {
+            if (highlight == i) {
+                wattron(menu_win, A_REVERSE);
+                mvwprintw(menu_win, i + 2, 2, "%s", choices[i]);
+                wattroff(menu_win, A_REVERSE);
+            } else {
+                mvwprintw(menu_win, i + 2, 2, "%s", choices[i]);
+            }
+        }
+        wrefresh(menu_win);
+
+        int c = wgetch(menu_win);
+        switch (c) {
+            case KEY_UP:
+                highlight = (highlight == 0) ? n_choices - 1 : highlight - 1;
+            break;
+            case KEY_DOWN:
+                highlight = (highlight == n_choices - 1) ? 0 : highlight + 1;
+            break;
+            case 10:
+                choice = highlight;
+            break;
+            case 'q':
+                choice = -1;
+            break;
+        }
+        if (choice != -1) break;
+    }
+
+    delwin(menu_win);
+    touchwin(stdscr);
+    refresh();
+
+    return choice;
+}
+
+int show_filesystem_menu(char **choices, int n_choices) {
+
+    return show_user_menu(choices, n_choices);
+}
+
 int user_manage_function_selections() {
     WINDOW *menu_win;
     int highlight = 0;
@@ -170,7 +231,7 @@ int user_manage_function_selections() {
     char *choices[] = {
         "Get user information",
         "Get process list",
-        "Sample 3"
+        "Manage Disk Quota"
     };
     int n_choices = 3;
 
@@ -224,6 +285,22 @@ int user_manage_function_selections() {
     refresh();
 
     return choice;
+}
+
+void redraw_main_tui(ChatWindows *wins) {
+    clear();
+    refresh();
+
+    wbkgd(stdscr, COLOR_PAIR(1));
+
+    touchwin(wins->recv_win_border);
+    wrefresh(wins->recv_win_border);
+
+    touchwin(wins->recv_win);
+    wrefresh(wins->recv_win);
+
+    touchwin(wins->send_win);
+    wrefresh(wins->send_win);
 }
 
 void cleanup_client_tui() {

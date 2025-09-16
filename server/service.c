@@ -88,11 +88,49 @@ void start_server_service(int client_socket) {
             break;
         }
         buffer[valread] = '\0';
+
+        if(strcmp(buffer, "get_fstab_quota_list") == 0) {
+            display_server_log("server get_fstab_quota_list method started");
+            FILE *fp = fopen("/etc/fstab", "r");
+            if (fp == NULL) {
+                send(client_socket, "ERROR: Cannot open /etc/fstab\n", 31, 0);
+            } else {
+                char line[BUF_SIZE];
+                while (fgets(line, sizeof(line), fp)) {
+                    if (line[0] == '#' || line[0] == '\n') continue;
+
+                    if (strstr(line, "usrquota") != NULL) {
+                        char fs_spec[100], fs_file[100];
+                        sscanf(line, "%s %s", fs_spec, fs_file);
+
+                        char mount_path[128];
+                        snprintf(mount_path, sizeof(mount_path), "%s\n", fs_file);
+                        send(client_socket, mount_path, strlen(mount_path), 0);
+                    }
+                }
+                fclose(fp);
+            }
+            send(client_socket, "END_OF_LIST\n", 12, 0);
+            display_server_log("Get fstab quota list method end");
+            continue;
+        }
+
         if(strchr(buffer,':')) {
             display_server_log(buffer);
             display_server_log("server getinfo method started");
-            char *username = strtok(buffer, ":");
-            char *method = strtok(NULL, ":");
+
+            char *token;
+            char *parts[5] = {NULL}; // username, method, arg1, arg2, arg3
+            int i = 0;
+            token = strtok(buffer, ":");
+            while(token != NULL && i < 5) {
+                parts[i++] = token;
+                token = strtok(NULL, ":");
+            }
+
+            char *username = parts[0];
+            char *method = parts[1];
+
             if (strcmp(method,"getinfo")==0) {
                 struct passwd *user_info = getpwnam(username);
                 if (user_info == NULL) {
@@ -133,6 +171,40 @@ void start_server_service(int client_socket) {
                 pclose(pipe);
                 send(client_socket, "END_OF_LIST\n", 12, 0);
                 display_server_log("Get process list method end");
+            }else if (strcmp(method, "get_quota") == 0) {
+                display_server_log("server get_quota method started");
+                char command[BUF_SIZE];
+                snprintf(command, sizeof(command), "quota -u %s 2>&1", username);
+                FILE *pipe = popen(command, "r");
+                char buf[BUF_SIZE];
+                while (fgets(buf, BUF_SIZE, pipe) != NULL) {
+                    send(client_socket, buf, strlen(buf), 0);
+                }
+                pclose(pipe);
+                send(client_socket, "END_OF_LIST\n", 12, 0);
+                display_server_log("Get quota method end");
+
+            } else if (strcmp(method, "set_quota") == 0) {
+                char *soft_limit = parts[2];
+                char *hard_limit = parts[3];
+                char *filesystem = parts[4];
+
+
+                display_server_log("server set_quota method started");
+                char command[BUF_SIZE];
+                snprintf(command, sizeof(command), "setquota -u %s %s %s 0 0 %s", username, soft_limit, hard_limit, filesystem);
+
+                FILE *pipe = popen(command, "r");
+                if (pipe == NULL) {
+                    send(client_socket, "Failed to execute setquota. Are you root?\n", 42, 0);
+                } else {
+                    char result_msg[BUF_SIZE];
+                    snprintf(result_msg, sizeof(result_msg), "Quota for %s on %s has been set.\n", username, filesystem);
+                    send(client_socket, result_msg, strlen(result_msg), 0);
+                    pclose(pipe);
+                }
+                send(client_socket, "END_OF_LIST\n", 12, 0);
+                display_server_log("Set quota method end");
             }
 
         }
