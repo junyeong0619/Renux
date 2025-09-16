@@ -70,12 +70,12 @@ void display_chat_message(WINDOW *win, const char *sender, const char *message) 
     wrefresh(win);
 }
 
-inline void get_client_input(WINDOW *win, char *buffer, int max_len) {
+inline void get_client_input(WINDOW *win, const char *prompt, char *buffer, int max_len) {
     werase(win);
     box(win, 0, 0);
-    mvwprintw(win, 1, 1, "com: ");
+    mvwprintw(win, 1, 1, "%s", prompt);
     wrefresh(win);
-    mvwgetstr(win, 1, 6, buffer);
+    mvwgetnstr(win, 1, strlen(prompt) + 2, buffer, max_len - 1);
 }
 
 static void print_menu(WINDOW *menu_win, int highlight, int offset, int items_per_page, int n_choices, char *choices[]) {

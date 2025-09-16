@@ -194,12 +194,12 @@ static void manage_users_handler(ChatWindows *wins, int sock) {
                 char soft_limit[50], hard_limit[50];
                 cleanup_client_tui();
                 printf("--- Set Disk Quota for %s on %s ---\n", selected_user, selected_fs);
-                printf("Enter Soft Limit (e.g., 500M): ");
-                scanf("%49s", soft_limit);
-                printf("Enter Hard Limit (e.g., 1G): ");
-                scanf("%49s", hard_limit);
+                display_chat_message(wins->recv_win, "System", "Enter Soft Limit (e.g., 500M)");
+                get_client_input(wins->send_win, "Soft Limit: ", soft_limit, 49);
 
-                init_client_tui(wins);
+                display_chat_message(wins->recv_win, "System", "Enter Hard Limit (e.g., 1G)");
+                get_client_input(wins->send_win, "Hard Limit: ", hard_limit, 49);
+
                 snprintf(command_buf, sizeof(command_buf), "%s:set_quota:%s:%s:%s", selected_user, soft_limit, hard_limit, selected_fs);
                 send(sock, command_buf, strlen(command_buf), 0);
                 }
@@ -221,6 +221,7 @@ static void manage_users_handler(ChatWindows *wins, int sock) {
 
 
 int main(int argc, char *argv[]) {
+
     int sock = 0;
     struct sockaddr_in serv_addr;
     char buffer[BUF_SIZE] = {0};
@@ -257,7 +258,7 @@ int main(int argc, char *argv[]) {
     }
 
     while(1) {
-        get_client_input(wins.send_win, buffer, BUF_SIZE);
+        get_client_input(wins.send_win, "com: ", buffer, BUF_SIZE);
 
         if (strcmp(buffer, "getu") == 0) {
             get_users_handler(&wins, sock);
