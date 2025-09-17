@@ -12,6 +12,8 @@ add_executable(server
         server/service.h
         utils/ssl_utils.c
         utils/ssl_utils.h
+        utils/log.c
+        utils/log.h
 )
 target_link_libraries(server -lncurses)
 
@@ -20,5 +22,7 @@ add_executable(client
         client/tui.c
         utils/ssl_utils.c
         utils/ssl_utils.h
+        utils/log.c
+        utils/log.h
 )
 target_link_libraries(client -lncurses)

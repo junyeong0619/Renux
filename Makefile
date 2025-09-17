@@ -8,11 +8,11 @@ all: $(TARGETS)
 
 
 server_e: server/server.c server/tui.c server/service.c utils/ssl_utils.c
-	$(CC) $(CFLAGS) -o server_e server/server.c server/tui.c server/service.c utils/ssl_utils.c -lncurses
+	$(CC) $(CFLAGS) -o server_e server/server.c server/tui.c server/service.c utils/ssl_utils.c utils/log.c -lncurses
 
 
 client_e: client/client.c client/tui.c utils/ssl_utils.c
-	$(CC) $(CFLAGS) -o client_e client/client.c client/tui.c utils/ssl_utils.c -lncurses -lpthread
+	$(CC) $(CFLAGS) -o client_e client/client.c client/tui.c utils/ssl_utils.c utils/log.c -lncurses -lpthread
 
 clean:
 	rm -f $(TARGETS)

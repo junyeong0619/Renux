@@ -3,6 +3,7 @@
 //
 
 #include "tui.h"
+#include "../utils/log.h"
 #include <string.h>
 #include <locale.h>
 #include <stdlib.h>
@@ -49,6 +50,7 @@ void init_server_tui() {
 }
 
 void display_server_log(const char *log_msg) {
+    file_log(log_msg); //logging
     wattron(log_win, COLOR_PAIR(1));
     wprintw(log_win, "\n %s", log_msg);
     wattroff(log_win, COLOR_PAIR(1));

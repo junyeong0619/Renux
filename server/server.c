@@ -13,6 +13,7 @@
 #include "tui.h"
 #include "service.h"
 #include "../utils/ssl_utils.h"
+#include "../utils/log.h"
 
 #define PORT 8080
 #define BUF_SIZE 1024
@@ -39,6 +40,7 @@ static void server_cleanup(int new_socket, int server_fd, char *username) {
 
     display_server_log("Exiting Server...");
     sleep(2);
+    cleanup_logger();\
     cleanup_server_tui();
 
     //free dynamic variables
@@ -78,6 +80,10 @@ int main() {
     username = get_username();
 
     init_server_tui();
+
+    init_server_tui();
+    init_logger("server.log");
+
 
     generate_socket(&server_fd);
     display_server_log("Server socket generated");
@@ -150,7 +156,7 @@ int main() {
             display_server_log("login Failed");
         }
     }
-
+    
     server_cleanup(new_socket, server_fd, username);
 
     return 0;
