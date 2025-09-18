@@ -134,6 +134,7 @@ int main() {
     snprintf(hashed_msg, sizeof(hashed_msg), "Password has been hashed. Hash: %lu", server_passwd_hashed);
     display_server_log(hashed_msg);
 
+#ifdef __APPLE__
     int kq = kqueue();
     if (kq == -1) {
         perror("kqueue");
@@ -142,6 +143,15 @@ int main() {
 
     struct kevent change_event;
     struct kevent event_list[MAX_EVENTS];
+#elif __linux__
+    int epoll_fd = epoll_create1(0);
+    if (epoll_fd == -1) {
+        perror("epoll_create1");
+        exit(EXIT_FAILURE);
+    }
+
+    struct epoll_event event, events[MAX_EVENTS];
+#endif
 
     client_state clients[MAX_EVENTS];
     for (int i = 0; i < MAX_EVENTS; i++) {
@@ -149,25 +159,51 @@ int main() {
         clients[i].is_logged_in = 0;
     }
 
+#ifdef __APPLE__
     EV_SET(&change_event, server_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0);
     if (kevent(kq, &change_event, 1, NULL, 0, NULL) == -1) {
         perror("kevent register");
         exit(EXIT_FAILURE);
     }
+#elif __linux__
+    event.events = EPOLLIN;
+    event.data.fd = server_fd;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) == -1) {
+        perror("epoll_ctl");
+        exit(EXIT_FAILURE);
+    }
+#endif
 
     display_server_log("Server is running with event loop...");
 
     while (1) {
+#ifdef __APPLE__
         int num_events = kevent(kq, NULL, 0, event_list, MAX_EVENTS, NULL);
+#elif __linux__
+        int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+#endif
+
         if (num_events == -1) {
+#ifdef __APPLE__
             perror("kevent wait");
+#elif __linux__
+            perror("epoll_wait");
+#endif
             exit(EXIT_FAILURE);
         }
 
         for (int i = 0; i < num_events; i++) {
+#ifdef __APPLE__
             int event_fd = event_list[i].ident;
+#elif __linux__
+            int event_fd = events[i].data.fd;
+#endif
 
+#ifdef __APPLE__
             if (event_list[i].flags & EV_EOF) {
+#elif __linux__
+            if (events[i].events & (EPOLLRDHUP | EPOLLHUP)) {
+#endif
                 display_server_log("Client disconnected.");
                 close(event_fd);
                 for (int j = 0; j < MAX_EVENTS; j++) {
@@ -184,8 +220,17 @@ int main() {
                     continue;
                 }
 
+#ifdef __APPLE__
                 EV_SET(&change_event, client_socket, EVFILT_READ, EV_ADD, 0, 0, 0);
                 kevent(kq, &change_event, 1, NULL, 0, NULL);
+#elif __linux__
+                event.events = EPOLLIN | EPOLLET;
+                event.data.fd = client_socket;
+                if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_socket, &event) == -1) {
+                    perror("epoll_ctl");
+                    exit(EXIT_FAILURE);
+                }
+#endif
 
                 for (int j = 0; j < MAX_EVENTS; j++) {
                     if (clients[j].fd == -1) {
