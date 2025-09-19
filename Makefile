@@ -1,6 +1,6 @@
 CC = gcc
 
-CFLAGS = -g -Wall -std=c99
+CFLAGS = -g -Wall -std=gnu99 -D_XOPEN_SOURCE=700
 
 TARGETS = server_e client_e
 

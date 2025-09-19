@@ -2,7 +2,6 @@
 // Created by Junyeong on 2025. 9. 2..
 //
 
-#define _POSIX_C_SOURCE 200809L
 
 #include "service.h"
 
