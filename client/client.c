@@ -1,6 +1,9 @@
 //
 // Created by Junyeong on 2025. 9. 2..
 //
+
+#define _POSIX_C_SOURCE 200809L
+
 #include "client.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +17,7 @@
 #include "tui.h"
 #include "../server/service.h"
 
+#define _DEFAULT_SOURCEx
 #define BUF_SIZE 1024
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)

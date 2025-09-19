@@ -60,21 +60,6 @@ static void server_cleanup(int new_socket, int server_fd, char *username) {
     free(username);
 }
 
-static void login_process(char *get_user_name, char *password, unsigned long server_passwd, int new_socket) {
-    if (is_valid_login(get_user_name, password,server_passwd) == 0) {
-        const char *success_msg = "logsuc";
-        send(new_socket, success_msg, strlen(success_msg), 0);
-        display_server_log("login succeeded. Waiting for command.");
-
-        start_server_service(new_socket);
-
-    } else {
-        const char *failure_msg = "Login failed";
-        send(new_socket, failure_msg, strlen(failure_msg), 0);
-        display_server_log("Could not login.");
-    }
-}
-
 static void safe_log_message_concat(char *message, char *string,   char *buffer) {
     snprintf(buffer, BUF_SIZE, string, message);
     display_server_log(buffer);
@@ -82,10 +67,8 @@ static void safe_log_message_concat(char *message, char *string,   char *buffer)
 
 int main() {
     int server_fd, new_socket;
-    ssize_t valread;
     struct sockaddr_in address;
     int addrlen = sizeof(address);
-    char buffer[BUF_SIZE] = {0};
     char log_message[BUF_SIZE + 100];
     char *username;
 

@@ -98,8 +98,8 @@ static void print_menu(WINDOW *menu_win, int highlight, int offset, int items_pe
         }
     }
 
-    int max_y, max_x;
-    getmaxyx(menu_win, max_y, max_x);
+    int max_y = getmaxy(menu_win);
+
     int current_page = (offset / items_per_page) + 1;
     int total_pages = (n_choices + items_per_page - 1) / items_per_page;
     mvwprintw(menu_win, max_y - 2, x, "Page %d / %d", current_page, total_pages);
