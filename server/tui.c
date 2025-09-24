@@ -68,3 +68,12 @@ inline void get_server_input(char *buffer, int max_len) {
 void cleanup_server_tui() {
     endwin();
 }
+
+void update_client_count(int count) {
+    int max_x = getmaxx(log_win_border);
+    int start_pos = max_x - 15;
+
+    mvwprintw(log_win_border, 0, start_pos, "             ");
+    mvwprintw(log_win_border, 0, start_pos, "Connected: %d", count);
+    wrefresh(log_win_border);
+}

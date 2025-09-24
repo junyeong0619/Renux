@@ -76,6 +76,7 @@ int main() {
     int addrlen = sizeof(address);
     char log_message[BUF_SIZE + 100];
     char *username;
+    int connected_clients = 0;
 
     //기본정보 초기화
     username = get_username();
@@ -84,6 +85,7 @@ int main() {
 
     init_server_tui();
     init_logger("server.log");
+    update_client_count(connected_clients);
 
 
     generate_socket(&server_fd);
@@ -193,6 +195,8 @@ int main() {
             if (events[i].events & (EPOLLRDHUP | EPOLLHUP)) {
 #endif
                 display_server_log("Client disconnected.");
+                connected_clients--;
+                update_client_count(connected_clients);
                 close(event_fd);
                 for (int j = 0; j < MAX_EVENTS; j++) {
                     if (clients[j].fd == event_fd) {
@@ -262,9 +266,15 @@ int main() {
 
                         if (get_user_name && password && is_valid_login(get_user_name, password, server_passwd_hashed) == 0) {
                             current_client->is_logged_in = 1;
+
+                            connected_clients++;
+                            update_client_count(connected_clients);
+
                             strncpy(current_client->username, get_user_name, USERNAME_MAX_LEN - 1);
+
                             send(event_fd, "logsuc", 6, 0);
                             display_server_log("Client login successful.");
+
                             char log_buf[256];
                             snprintf(log_buf, sizeof(log_buf), "Client login successful: %s@%s", current_client->username, current_client->ip_addr);
                             display_server_log(log_buf);
