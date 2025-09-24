@@ -10,7 +10,10 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <signal.h>
 #include <netinet/in.h>
+#include <sys/errno.h>
+
 #include "tui.h"
 #include "service.h"
 #include "../utils/ssl_utils.h"
@@ -29,6 +32,7 @@
 #define MAX_EVENTS 128
 #define USERNAME_MAX_LEN 32
 
+volatile sig_atomic_t server_running = 1;
 
 typedef struct {
     int fd;
@@ -37,6 +41,10 @@ typedef struct {
     char ip_addr[INET_ADDRSTRLEN];
     time_t last_activity;
 } client_state;
+
+void handle_sigint(int sig) {
+    server_running = 0;
+}
 
 static void generate_socket(int *server_fd) {
     if ((*server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
@@ -52,8 +60,7 @@ static void get_server_password(char *server_passwd) {
     display_server_log("Password save completed.");
 }
 
-static void server_cleanup(int new_socket, int server_fd, char *username) {
-    close(new_socket);
+static void server_cleanup(int server_fd, char *username) {
     close(server_fd);
 
     display_server_log("Exiting Server...");
@@ -77,6 +84,8 @@ int main() {
     char log_message[BUF_SIZE + 100];
     char *username;
     int connected_clients = 0;
+
+    signal(SIGINT, handle_sigint);
 
     //기본정보 초기화
     username = get_username();
@@ -166,20 +175,24 @@ int main() {
 
     display_server_log("Server is running with event loop...");
 
-    while (1) {
+    while (server_running) {
 #ifdef __APPLE__
-        int num_events = kevent(kq, NULL, 0, event_list, MAX_EVENTS, NULL);
+        struct timespec timeout = {1, 0};
+        int num_events = kevent(kq, NULL, 0, event_list, MAX_EVENTS, &timeout);
 #elif __linux__
-        int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+        int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, 1000);
 #endif
 
         if (num_events == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
 #ifdef __APPLE__
             perror("kevent wait");
 #elif __linux__
             perror("epoll_wait");
 #endif
-            exit(EXIT_FAILURE);
+            break;
         }
 
         for (int i = 0; i < num_events; i++) {
@@ -288,7 +301,7 @@ int main() {
         }
     }
 
-    server_cleanup(new_socket, server_fd, username);
+    server_cleanup(server_fd, username);
 
     return 0;
 }
