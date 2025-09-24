@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include "tui.h"
@@ -26,11 +27,15 @@
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #define MAX_EVENTS 128
+#define USERNAME_MAX_LEN 32
 
 
 typedef struct {
     int fd;
-    int is_logged_in; // 0:logout 1:login
+    int is_logged_in;
+    char username[USERNAME_MAX_LEN];
+    char ip_addr[INET_ADDRSTRLEN];
+    time_t last_activity;
 } client_state;
 
 static void generate_socket(int *server_fd) {
@@ -218,6 +223,9 @@ int main() {
                 for (int j = 0; j < MAX_EVENTS; j++) {
                     if (clients[j].fd == -1) {
                         clients[j].fd = client_socket;
+                        if (address.sin_family == AF_INET) {
+                            inet_ntop(AF_INET, &address.sin_addr, clients[j].ip_addr, INET_ADDRSTRLEN);
+                        }
                         break;
                     }
                 }
@@ -245,7 +253,7 @@ int main() {
                     if (current_client == NULL) continue; // safety check
 
                     if (current_client->is_logged_in) {
-                        handle_client_request(event_fd, buffer);
+                        handle_client_request(event_fd, buffer, current_client->username);
                     } else {
                         char data[BUF_SIZE];
                         strcpy(data, buffer);
@@ -254,8 +262,12 @@ int main() {
 
                         if (get_user_name && password && is_valid_login(get_user_name, password, server_passwd_hashed) == 0) {
                             current_client->is_logged_in = 1;
+                            strncpy(current_client->username, get_user_name, USERNAME_MAX_LEN - 1);
                             send(event_fd, "logsuc", 6, 0);
                             display_server_log("Client login successful.");
+                            char log_buf[256];
+                            snprintf(log_buf, sizeof(log_buf), "Client login successful: %s@%s", current_client->username, current_client->ip_addr);
+                            display_server_log(log_buf);
                         } else {
                             send(event_fd, "Login failed", 12, 0);
                             display_server_log("Client login failed.");

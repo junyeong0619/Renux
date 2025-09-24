@@ -11,7 +11,7 @@
 char *get_username(void);
 int is_valid_login(char *username, char *passwd, unsigned long server_passwd);
 void execute_command(char *command);
-void handle_client_request(int client_socket, char* buffer);
+void handle_client_request(int client_socket, char* buffer, const char* username);
 
 
 
