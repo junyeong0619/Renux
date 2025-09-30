@@ -183,7 +183,7 @@ void handle_client_request(int client_socket, char* buffer, const char* username
             snprintf(log_message, sizeof(log_message), "[%s] Setting quota for %s on %s: soft=%s, hard=%s", username, target_username, filesystem, soft_limit, hard_limit);
             display_server_log(log_message);
             char command[BUF_SIZE];
-            snprintf(command, sizeof(command), "setquota -u %s %s %s 0 0 %s", target_username, soft_limit, hard_limit, filesystem);
+            snprintf(command, sizeof(command), "setquota -u %s %s %s 0 0 %s 2>&1", target_username, soft_limit, hard_limit, filesystem);
             pipe = popen(command, "r");
             if (pipe == NULL) {
                 send(client_socket, "Failed to execute setquota. Are you root?\n", 42, 0);

@@ -49,7 +49,9 @@ static void *receive_handler(void *args) {
 
     while ((read_size = read(sock, recv_buffer, BUF_SIZE - 1)) > 0) {
         if (line_len + read_size >= BUF_SIZE) {
-
+            pthread_mutex_lock(&menu_lock);
+            display_chat_message(wins.recv_win, "system", "WARNING: Incoming message is too long and was truncated. (BUF_SIZE exceeded)");
+            pthread_mutex_unlock(&menu_lock);
             line_len = 0;
             continue;
         }
@@ -236,15 +238,32 @@ int main(int argc, char *argv[]) {
         port = argv[2];
     } else {
         printf("Input format in ./client <ipaddress> <port> \n");
+        return EXIT_FAILURE;
     }
 
     init_client_tui(&wins);
 
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) { /* ... */ }
+    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        perror("Socket creation failed");
+        cleanup_client_tui();
+        return EXIT_FAILURE;
+    }
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(atoi(port));
-    if (inet_pton(AF_INET, ipaddr, &serv_addr.sin_addr) <= 0) { /* ... */ }
-    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) { /* ... */ }
+
+    if (inet_pton(AF_INET, ipaddr, &serv_addr.sin_addr) <= 0) {
+        perror("Invalid address/ Address not supported");
+        close(sock);
+        cleanup_client_tui();
+        return EXIT_FAILURE;
+    }
+
+    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        perror("Connection failed");
+        close(sock);
+        cleanup_client_tui();
+        return EXIT_FAILURE;
+    }
 
     display_chat_message(wins.recv_win, "system", "Connected to server. Waiting for server message...");
 
