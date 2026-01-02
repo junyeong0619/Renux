@@ -24,8 +24,12 @@ const size_t MAX_BACKUP_COUNT = 500;
 volatile sig_atomic_t keep_running = 1;
 int inotify_fd;
 std::map<int, std::string> wd_to_path;
-std::map<std::string, std::string> file_backups;
 
+// [변경] 백업 데이터 관리
+std::map<std::string, std::string> file_backups;
+std::map<std::string, bool> is_new_file; // 새로 생성된 파일인지 추적
+
+// --- Bash Hook (생략 없이 그대로) ---
 const std::string HOOK_MARKER = "# --- Renux Shell Logging Hook ---";
 const std::string HOOK_SCRIPT = R"(
 # --- Renux Shell Logging Hook ---
@@ -98,7 +102,7 @@ std::string generate_diff(const std::string& original, const std::string& filepa
 
     std::string cmd = "diff -u -N " + temp_path + " " + filepath + " 2>&1";
     FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) return "";
+    if (!pipe) return "[Error] diff command failed.";
 
     std::stringstream diff_output;
     char buffer[128];
@@ -232,52 +236,85 @@ int main(int argc, char* argv[]) {
                 if (dir_path.empty()) continue;
                 std::string full_path = dir_path + "/" + event->name;
 
+                // 필터링
                 if (full_path.find("renux.log") != std::string::npos) continue;
                 if (full_path.find(".swp") != std::string::npos) continue;
                 if (full_path.find(".swx") != std::string::npos) continue;
                 if (full_path.find(".viminfo") != std::string::npos) continue;
                 if (full_path.find("~") != std::string::npos) continue;
+                if (full_path.find("/.cache/") != std::string::npos) continue;
+                if (full_path.find("/abrt/") != std::string::npos) continue;
 
                 bool is_digit_only = true;
                 for(char c : std::string(event->name)) if(!isdigit(c)) is_digit_only = false;
                 if(is_digit_only) continue;
 
+                // [중요] 디렉토리 생성 감시
                 if (event->mask & IN_ISDIR && event->mask & IN_CREATE) {
                     add_watch_to_dir(full_path);
                 }
+                // [중요] 파일 생성 감시 (Race Condition 방어 1단계)
+                // 파일이 생성되었다는 것은 무조건 '빈 파일'에서 시작한다는 뜻입니다.
+                // 나중에 IN_OPEN이 와서 "내용 있던데요?"라고 해도 무시해야 합니다.
+                else if ((event->mask & IN_CREATE) && !(event->mask & IN_ISDIR)) {
+                    if (file_backups.size() > MAX_BACKUP_COUNT) file_backups.clear();
+                    file_backups[full_path] = "";
+                    is_new_file[full_path] = true; // 플래그 설정
+                }
+
+                // 쉘 로그
                 else if (event->mask & IN_MODIFY && full_path.find(".renux_history") != std::string::npos) {
                     std::string content = read_last_line(full_path);
                     if (!content.empty()) write_agent_log("SHELL [" + full_path + "]: " + content);
                 }
+
+                // 파일 열림 (백업 수행)
                 else if (event->mask & IN_OPEN) {
                     if (full_path.find(".renux_history") != std::string::npos) continue;
                     if (!(event->mask & IN_ISDIR)) {
-                        if (file_backups.size() > MAX_BACKUP_COUNT) file_backups.clear();
 
-                        if (fs::exists(full_path) && fs::file_size(full_path) < MAX_BACKUP_SIZE) {
-                            file_backups[full_path] = read_file_content(full_path);
-                        } else {
-                            file_backups[full_path] = "";
+                        // [Fix] Race Condition 방어 2단계:
+                        // 방금 생성된 파일(is_new_file)이라면, 디스크에서 읽지 말고 '빈 파일' 상태 유지
+                        if (is_new_file.count(full_path)) {
+                            // Do nothing (Keep original as "")
+                        }
+                        else if (file_backups.count(full_path)) {
+                             // 이미 백업 있으면 유지 (Vim Truncate 방어)
+                        }
+                        else {
+                            // 진짜 기존 파일 열람
+                            if (file_backups.size() > MAX_BACKUP_COUNT) file_backups.clear();
+                            if (fs::exists(full_path) && fs::file_size(full_path) < MAX_BACKUP_SIZE) {
+                                file_backups[full_path] = read_file_content(full_path);
+                            } else {
+                                file_backups[full_path] = "";
+                            }
                         }
                     }
                 }
+                // 파일 저장 및 이동 완료
                 else if ((event->mask & IN_CLOSE_WRITE) || (event->mask & IN_MOVED_TO)) {
                     if (full_path.find(".renux_history") != std::string::npos) continue;
-                    std::string original = "";
 
+                    std::string original = "";
                     if (file_backups.count(full_path)) {
                         original = file_backups[full_path];
-                        file_backups.erase(full_path);
                     }
 
                     if (fs::exists(full_path)) {
                         std::string current = read_file_content(full_path);
                         if (original != current) {
                             std::string diff = generate_diff(original, full_path);
-                            if (diff.empty()) diff = "[New File Content]\n" + current;
+                            if (diff.empty()) diff = "[Change Detected] (No diff output)\n" + current;
+
                             write_agent_log("FILE MODIFIED: " + full_path + "\n" + diff);
+
+                            // 현재 상태를 새로운 원본으로 업데이트 (연속 수정 지원)
+                            file_backups[full_path] = current;
                         }
                     }
+                    // 저장 끝났으니 '새 파일' 플래그 해제
+                    if (is_new_file.count(full_path)) is_new_file.erase(full_path);
                 }
             }
         }
