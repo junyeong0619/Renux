@@ -231,9 +231,10 @@ int user_manage_function_selections() {
     char *choices[] = {
         "Get user information",
         "Get process list",
-        "Manage Disk Quota"
+        "Manage Disk Quota",
+        "Trace User Activity"
     };
-    int n_choices = 3;
+    int n_choices = 4;
 
     clear();
     mvprintw(0, 0, "Select an action. (Enter to confirm, 'q' to cancel)");

@@ -29,6 +29,9 @@ volatile bool is_fs_list_mode = false;
 char **quota_fs_list = NULL;
 int quota_fs_count = 0;
 
+volatile bool is_trace_mode = false;
+WINDOW *g_trace_win = NULL;
+
 pthread_mutex_t menu_lock = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct {
@@ -87,6 +90,10 @@ static void *receive_handler(void *args) {
                     quota_fs_list = realloc(quota_fs_list, sizeof(char*) * quota_fs_count);
                     quota_fs_list[quota_fs_count - 1] = strdup(completed_line);
                 }
+            }else if (is_trace_mode && g_trace_win != NULL) {
+                // Trace 창에 수신된 로그 한 줄 출력
+                wprintw(g_trace_win, "%s\n", completed_line);
+                wrefresh(g_trace_win);
             }
             else {
                 display_chat_message(wins.recv_win, "server", completed_line);
@@ -125,6 +132,56 @@ static void get_users_handler(ChatWindows *wins, int sock) {
 static int manage_user_functions() {
     return user_manage_function_selections();
 };
+
+void run_trace_mode(int sock, const char* user, ChatWindows *wins) {
+    int height = LINES - 6;
+    int width = COLS - 6;
+    int starty = 3;
+    int startx = 3;
+
+    pthread_mutex_lock(&menu_lock);
+    g_trace_win = newwin(height, width, starty, startx);
+    wbkgd(g_trace_win, COLOR_PAIR(1));
+    scrollok(g_trace_win, TRUE);
+    box(g_trace_win, 0, 0);
+    mvwprintw(g_trace_win, 0, 2, "[ Trace Activity: %s ] (Press 'q' to close)", user);
+    wrefresh(g_trace_win);
+
+    is_trace_mode = true;
+    nodelay(g_trace_win, TRUE);
+    pthread_mutex_unlock(&menu_lock);
+
+    while(1) {
+        int ch = wgetch(g_trace_win);
+        if (ch == 'q') break;
+
+        pthread_mutex_lock(&menu_lock);
+        werase(g_trace_win);
+        box(g_trace_win, 0, 0);
+        mvwprintw(g_trace_win, 0, 2, "[ Trace Activity: %s ] (Press 'q' to close)", user);
+        wrefresh(g_trace_win);
+        pthread_mutex_unlock(&menu_lock);
+
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd), "trace %s", user);
+        send(sock, cmd, strlen(cmd), 0);
+
+        for(int i=0; i<10; i++) {
+            usleep(100000); // 0.1초
+            ch = wgetch(g_trace_win);
+            if (ch == 'q') goto exit_trace;
+        }
+    }
+
+    exit_trace:
+    pthread_mutex_lock(&menu_lock);
+    is_trace_mode = false;
+    delwin(g_trace_win);
+    g_trace_win = NULL;
+    pthread_mutex_unlock(&menu_lock);
+
+    redraw_main_tui(wins);
+}
 
 static void manage_users_handler(ChatWindows *wins, int sock) {
     int selection = 0;
@@ -208,6 +265,11 @@ static void manage_users_handler(ChatWindows *wins, int sock) {
                 snprintf(command_buf, sizeof(command_buf), "%s:set_quota:%s:%s:%s", selected_user, soft_limit, hard_limit, selected_fs);
                 send(sock, command_buf, strlen(command_buf), 0);
                 }
+                break;
+            }
+            case 3:
+            {
+                run_trace_mode(sock, selected_user, wins);
                 break;
             }
             default: break;
