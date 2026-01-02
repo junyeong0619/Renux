@@ -86,6 +86,32 @@ void handle_client_request(int client_socket, char* buffer, const char* username
     snprintf(log_message, sizeof(log_message), "[%s] Received: %s", username, buffer);
     display_server_log(log_message);
 
+    if (strncmp(buffer, "trace ", 6) == 0) {
+        char *target_user = buffer + 6;
+
+        target_user[strcspn(target_user, "\n")] = 0;
+
+        snprintf(log_message, sizeof(log_message), "[%s] Executing trace for: %s", username, target_user);
+        display_server_log(log_message);
+
+        char command[BUF_SIZE];
+        snprintf(command, sizeof(command), "/usr/bin/renux trace %s", target_user);
+
+        pipe = popen(command, "r");
+        if (pipe == NULL) {
+            send(client_socket, "Error: Failed to execute renux agent.\n", 36, 0);
+        } else {
+            char line[BUF_SIZE];
+            while (fgets(line, sizeof(line), pipe) != NULL) {
+                send(client_socket, line, strlen(line), 0);
+            }
+            pclose(pipe);
+        }
+
+        display_server_log("Trace result sent to client.");
+        return;
+    }
+
     if (strcmp(buffer, "get_fstab_quota_list") == 0) {
         snprintf(log_message, sizeof(log_message), "[%s] Executing: get_fstab_quota_list", username);
         display_server_log(log_message);
