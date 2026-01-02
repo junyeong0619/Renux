@@ -1,10 +1,3 @@
-/**
- * renux (m_server.cpp) - Final Release (History Diff Fixed)
- * - Recursive Monitoring
- * - Shell Logging (Optimized)
- * - File Diff Logging (Ignores .renux_history diffs)
- */
-
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -25,7 +18,7 @@ namespace fs = std::filesystem;
 const std::string AGENT_LOG_FILE = "/var/log/renux.log";
 const std::string ROOT_HOME = "/root";
 const std::string USER_HOME_BASE = "/home";
-const off_t MAX_BACKUP_SIZE = 1024 * 1024; // 1MB
+const off_t MAX_BACKUP_SIZE = 1024 * 1024;
 const size_t MAX_BACKUP_COUNT = 500;
 
 volatile sig_atomic_t keep_running = 1;
@@ -33,7 +26,6 @@ int inotify_fd;
 std::map<int, std::string> wd_to_path;
 std::map<std::string, std::string> file_backups;
 
-// --- Bash Hook ---
 const std::string HOOK_MARKER = "# --- Renux Shell Logging Hook ---";
 const std::string HOOK_SCRIPT = R"(
 # --- Renux Shell Logging Hook ---
@@ -227,6 +219,7 @@ int main(int argc, char* argv[]) {
     }
 
     char buffer[4096] __attribute__ ((aligned(__alignof__(struct inotify_event))));
+
     while (keep_running) {
         ssize_t len = read(inotify_fd, buffer, sizeof(buffer));
         if (len <= 0) break;
@@ -244,6 +237,7 @@ int main(int argc, char* argv[]) {
                 if (full_path.find(".swx") != std::string::npos) continue;
                 if (full_path.find(".viminfo") != std::string::npos) continue;
                 if (full_path.find("~") != std::string::npos) continue;
+
                 bool is_digit_only = true;
                 for(char c : std::string(event->name)) if(!isdigit(c)) is_digit_only = false;
                 if(is_digit_only) continue;
@@ -253,13 +247,13 @@ int main(int argc, char* argv[]) {
                 }
                 else if (event->mask & IN_MODIFY && full_path.find(".renux_history") != std::string::npos) {
                     std::string content = read_last_line(full_path);
-                    if (!content.empty()) write_agent_log("SHELL: " + content);
+                    if (!content.empty()) write_agent_log("SHELL [" + full_path + "]: " + content);
                 }
                 else if (event->mask & IN_OPEN) {
                     if (full_path.find(".renux_history") != std::string::npos) continue;
-
                     if (!(event->mask & IN_ISDIR)) {
                         if (file_backups.size() > MAX_BACKUP_COUNT) file_backups.clear();
+
                         if (fs::exists(full_path) && fs::file_size(full_path) < MAX_BACKUP_SIZE) {
                             file_backups[full_path] = read_file_content(full_path);
                         } else {
@@ -269,8 +263,8 @@ int main(int argc, char* argv[]) {
                 }
                 else if ((event->mask & IN_CLOSE_WRITE) || (event->mask & IN_MOVED_TO)) {
                     if (full_path.find(".renux_history") != std::string::npos) continue;
-
                     std::string original = "";
+
                     if (file_backups.count(full_path)) {
                         original = file_backups[full_path];
                         file_backups.erase(full_path);
