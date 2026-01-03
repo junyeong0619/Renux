@@ -8,6 +8,9 @@ add_executable(renux
         monitoring/monitor.cpp
 )
 
+add_executable(renux_master
+        monitoring/master.cpp
+)
 
 add_executable(server
         server/server.c

@@ -4,7 +4,7 @@ CXX = g++
 CFLAGS = -g -Wall -std=gnu99 -D_XOPEN_SOURCE=700
 CXXFLAGS = -std=c++17
 
-TARGETS = server_e client_e renux  
+TARGETS = server_e client_e renux
 
 all: $(TARGETS)
 
@@ -16,6 +16,9 @@ client_e: client/client.c client/tui.c utils/ssl_utils.c
 
 renux: monitoring/monitor.cpp
 	$(CXX) $(CXXFLAGS) -o renux monitoring/monitor.cpp
+
+renux_master: monitoring/master.cpp
+	$(CXX) $(CXXFLAGS) -o renux_master monitoring/master.cpp
 
 clean:
 	rm -f $(TARGETS)
