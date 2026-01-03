@@ -1,3 +1,10 @@
+/**
+ * renux (monitor.cpp) - Network Agent Version
+ * - Auto IP Detection (Self-Identity)
+ * - Config File Support (/etc/renux.conf)
+ * - Real-time Socket Transmission
+ */
+
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -13,23 +20,144 @@
 #include <algorithm>
 #include <sstream>
 
+// 네트워크 관련 헤더 추가
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <netdb.h>
+
 namespace fs = std::filesystem;
 
+// --- 설정 및 상수 ---
 const std::string AGENT_LOG_FILE = "/var/log/renux.log";
+const std::string CONFIG_FILE = "/etc/renux.conf";
 const std::string ROOT_HOME = "/root";
 const std::string USER_HOME_BASE = "/home";
 const off_t MAX_BACKUP_SIZE = 1024 * 1024;
 const size_t MAX_BACKUP_COUNT = 500;
 
+// --- 전역 변수 ---
 volatile sig_atomic_t keep_running = 1;
 int inotify_fd;
 std::map<int, std::string> wd_to_path;
-
-// [변경] 백업 데이터 관리
 std::map<std::string, std::string> file_backups;
-std::map<std::string, bool> is_new_file; // 새로 생성된 파일인지 추적
+std::map<std::string, bool> is_new_file;
 
-// --- Bash Hook (생략 없이 그대로) ---
+// 네트워크 전역 변수
+std::string MY_IP = "Unknown";
+std::string MASTER_IP = "";
+int MASTER_PORT = 0;
+int master_sock = -1;
+
+// --- [신규 기능] 내 IP 주소 가져오기 ---
+std::string get_my_ip_address() {
+    struct ifaddrs *ifaddr, *ifa;
+    char host[NI_MAXHOST];
+    std::string found_ip = "127.0.0.1";
+
+    if (getifaddrs(&ifaddr) == -1) return found_ip;
+
+    // 인터페이스를 순회하며 IPv4 주소 찾기
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL) continue;
+        if (ifa->ifa_addr->sa_family == AF_INET) { // IPv4만
+            int s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in),
+                                host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST);
+            if (s == 0) {
+                std::string ip(host);
+                // 로컬 루프백(127.0.0.1)은 제외하고 실제 IP 찾기
+                if (ip != "127.0.0.1") {
+                    found_ip = ip;
+                    // eth0, ens33 등을 선호한다면 여기서 break 해도 됨
+                }
+            }
+        }
+    }
+    freeifaddrs(ifaddr);
+    return found_ip;
+}
+
+// --- [신규 기능] 설정 파일 읽기 ---
+void load_config() {
+    std::ifstream file(CONFIG_FILE);
+    if (!file.is_open()) {
+        std::cerr << "[Warning] Config file not found at " << CONFIG_FILE << ". Network disabled." << std::endl;
+        return;
+    }
+    std::string line;
+    while (std::getline(file, line)) {
+        std::stringstream ss(line);
+        std::string key, value;
+        if (std::getline(ss, key, '=') && std::getline(ss, value)) {
+            if (key == "MASTER_IP") MASTER_IP = value;
+            else if (key == "MASTER_PORT") MASTER_PORT = std::stoi(value);
+        }
+    }
+}
+
+// --- [신규 기능] 마스터 서버 연결 ---
+void connect_to_master() {
+    if (MASTER_IP.empty() || MASTER_PORT == 0) return;
+    if (master_sock != -1) return; // 이미 연결됨
+
+    master_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (master_sock < 0) return;
+
+    struct sockaddr_in serv_addr;
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(MASTER_PORT);
+
+    if (inet_pton(AF_INET, MASTER_IP.c_str(), &serv_addr.sin_addr) <= 0) {
+        close(master_sock); master_sock = -1; return;
+    }
+
+    if (connect(master_sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        // 연결 실패 (조용히 넘어감 - 나중에 재시도)
+        close(master_sock); master_sock = -1;
+    } else {
+        // 연결 성공 시 식별 패킷 전송
+        std::string hello = "HELLO|" + MY_IP + "|Renux Agent Started\n";
+        send(master_sock, hello.c_str(), hello.length(), 0);
+    }
+}
+
+// --- [신규 기능] 로그 전송 (자동 재연결 포함) ---
+void send_log_to_master(const std::string& message) {
+    if (MASTER_IP.empty()) return;
+
+    // 연결 끊겼으면 재연결 시도
+    if (master_sock == -1) connect_to_master();
+    if (master_sock == -1) return; // 여전히 실패하면 포기
+
+    // 패킷 포맷: "LOG|내IP|메시지"
+    std::string packet = "LOG|" + MY_IP + "|" + message + "\n";
+
+    ssize_t sent = send(master_sock, packet.c_str(), packet.length(), MSG_NOSIGNAL);
+    if (sent < 0) {
+        // 전송 실패 시 소켓 닫고 다음번에 재연결 유도
+        close(master_sock);
+        master_sock = -1;
+    }
+}
+
+// --- 기존 로그 함수 수정 ---
+void write_agent_log(const std::string& message) {
+    // 1. 로컬 파일 기록
+    std::ofstream log_file(AGENT_LOG_FILE, std::ios::app);
+    if (log_file.is_open()) {
+        std::time_t now = std::time(nullptr);
+        char time_buf[100];
+        std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+
+        std::string formatted_msg = "[" + std::string(time_buf) + "] " + message;
+        log_file << formatted_msg << std::endl;
+
+        // 2. [네트워크 전송] 마스터 서버로 쏘기
+        send_log_to_master(formatted_msg);
+    }
+}
+
+// --- 이하 기존 로직과 동일 ---
 const std::string HOOK_MARKER = "# --- Renux Shell Logging Hook ---";
 const std::string HOOK_SCRIPT = R"(
 # --- Renux Shell Logging Hook ---
@@ -55,16 +183,7 @@ export PROMPT_COMMAND="log_to_renux_history"
 
 void signal_handler(int sig) {
     keep_running = 0;
-}
-
-void write_agent_log(const std::string& message) {
-    std::ofstream log_file(AGENT_LOG_FILE, std::ios::app);
-    if (log_file.is_open()) {
-        std::time_t now = std::time(nullptr);
-        char time_buf[100];
-        std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
-        log_file << "[" << time_buf << "] " << message << std::endl;
-    }
+    if (master_sock != -1) close(master_sock); // 종료 시 소켓 정리
 }
 
 std::string read_file_content(const std::string& path) {
@@ -165,6 +284,7 @@ void add_watch_recursive(const std::string& root) {
 }
 
 void handle_trace_command(const std::string& keyword) {
+    // Trace 명령은 로컬 로그만 검색 (네트워크 X)
     std::ifstream file(AGENT_LOG_FILE);
     if (!file.is_open()) {
         std::cerr << "Cannot open log." << std::endl; return;
@@ -200,6 +320,11 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // 1. 설정 로드 및 IP 확인
+    load_config();
+    MY_IP = get_my_ip_address();
+
+    // 2. 초기 로그
     {
         std::ofstream test(AGENT_LOG_FILE, std::ios::app);
         if (!test.is_open()) { std::cerr << "Root required." << std::endl; return 1; }
@@ -213,7 +338,9 @@ int main(int argc, char* argv[]) {
     inotify_fd = inotify_init();
     if (inotify_fd < 0) return 1;
 
-    write_agent_log("--- Monitoring Started ---");
+    write_agent_log("--- Monitoring Started on Agent [" + MY_IP + "] ---");
+    // 최초 연결 시도
+    connect_to_master();
 
     add_watch_recursive(ROOT_HOME);
     if (fs::exists(USER_HOME_BASE)) {
@@ -249,40 +376,26 @@ int main(int argc, char* argv[]) {
                 for(char c : std::string(event->name)) if(!isdigit(c)) is_digit_only = false;
                 if(is_digit_only) continue;
 
-                // [중요] 디렉토리 생성 감시
                 if (event->mask & IN_ISDIR && event->mask & IN_CREATE) {
                     add_watch_to_dir(full_path);
                 }
-                // [중요] 파일 생성 감시 (Race Condition 방어 1단계)
-                // 파일이 생성되었다는 것은 무조건 '빈 파일'에서 시작한다는 뜻입니다.
-                // 나중에 IN_OPEN이 와서 "내용 있던데요?"라고 해도 무시해야 합니다.
                 else if ((event->mask & IN_CREATE) && !(event->mask & IN_ISDIR)) {
                     if (file_backups.size() > MAX_BACKUP_COUNT) file_backups.clear();
                     file_backups[full_path] = "";
-                    is_new_file[full_path] = true; // 플래그 설정
+                    is_new_file[full_path] = true;
                 }
 
-                // 쉘 로그
                 else if (event->mask & IN_MODIFY && full_path.find(".renux_history") != std::string::npos) {
                     std::string content = read_last_line(full_path);
                     if (!content.empty()) write_agent_log("SHELL [" + full_path + "]: " + content);
                 }
 
-                // 파일 열림 (백업 수행)
                 else if (event->mask & IN_OPEN) {
                     if (full_path.find(".renux_history") != std::string::npos) continue;
                     if (!(event->mask & IN_ISDIR)) {
-
-                        // [Fix] Race Condition 방어 2단계:
-                        // 방금 생성된 파일(is_new_file)이라면, 디스크에서 읽지 말고 '빈 파일' 상태 유지
-                        if (is_new_file.count(full_path)) {
-                            // Do nothing (Keep original as "")
-                        }
-                        else if (file_backups.count(full_path)) {
-                             // 이미 백업 있으면 유지 (Vim Truncate 방어)
-                        }
+                        if (is_new_file.count(full_path)) { }
+                        else if (file_backups.count(full_path)) { }
                         else {
-                            // 진짜 기존 파일 열람
                             if (file_backups.size() > MAX_BACKUP_COUNT) file_backups.clear();
                             if (fs::exists(full_path) && fs::file_size(full_path) < MAX_BACKUP_SIZE) {
                                 file_backups[full_path] = read_file_content(full_path);
@@ -292,14 +405,10 @@ int main(int argc, char* argv[]) {
                         }
                     }
                 }
-                // 파일 저장 및 이동 완료
                 else if ((event->mask & IN_CLOSE_WRITE) || (event->mask & IN_MOVED_TO)) {
                     if (full_path.find(".renux_history") != std::string::npos) continue;
-
                     std::string original = "";
-                    if (file_backups.count(full_path)) {
-                        original = file_backups[full_path];
-                    }
+                    if (file_backups.count(full_path)) original = file_backups[full_path];
 
                     if (fs::exists(full_path)) {
                         std::string current = read_file_content(full_path);
@@ -308,17 +417,15 @@ int main(int argc, char* argv[]) {
                             if (diff.empty()) diff = "[Change Detected] (No diff output)\n" + current;
 
                             write_agent_log("FILE MODIFIED: " + full_path + "\n" + diff);
-
-                            // 현재 상태를 새로운 원본으로 업데이트 (연속 수정 지원)
                             file_backups[full_path] = current;
                         }
                     }
-                    // 저장 끝났으니 '새 파일' 플래그 해제
                     if (is_new_file.count(full_path)) is_new_file.erase(full_path);
                 }
             }
         }
     }
+    if (master_sock != -1) close(master_sock);
     close(inotify_fd);
     write_agent_log("Monitoring Stopped.");
     return 0;
