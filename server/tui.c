@@ -12,7 +12,11 @@ static WINDOW *log_win_border;
 static WINDOW *log_win;
 static WINDOW *input_win;
 
+int headless_mode = 0;
+
 void init_server_tui() {
+    if (headless_mode) return;
+
     setlocale(LC_ALL, "ko_KR.UTF-8");
     initscr();
 
@@ -50,7 +54,12 @@ void init_server_tui() {
 }
 
 void display_server_log(const char *log_msg) {
-    file_log(log_msg); //logging
+    file_log(log_msg);
+    if (headless_mode) {
+        printf("[server_e] %s\n", log_msg);
+        fflush(stdout);
+        return;
+    }
     wattron(log_win, COLOR_PAIR(1));
     wprintw(log_win, "\n %s", log_msg);
     wattroff(log_win, COLOR_PAIR(1));
@@ -58,6 +67,8 @@ void display_server_log(const char *log_msg) {
 }
 
 inline void get_server_input(char *buffer, int max_len) {
+    if (headless_mode) return;  /* 헤드리스 모드: 호출자가 직접 버퍼를 채움 */
+
     werase(input_win);
     box(input_win, 0, 0);
     mvwprintw(input_win, 1, 1, "input command: ");
@@ -66,10 +77,13 @@ inline void get_server_input(char *buffer, int max_len) {
 }
 
 void cleanup_server_tui() {
+    if (headless_mode) return;
     endwin();
 }
 
 void update_client_count(int count) {
+    if (headless_mode) return;
+
     int max_x = getmaxx(log_win_border);
     int start_pos = max_x - 15;
 

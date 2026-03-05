@@ -1,0 +1,54 @@
+services:
+
+  # ── renux_master: 로그 집계 서버 (port 9000) ──────────────────────
+  master:
+    build: .
+    container_name: renux_master
+    command: ./renux_master
+    ports:
+      - "9000:9000"
+    networks:
+      renux_net:
+        aliases:
+          - master
+
+  # ── server_e: 관리 서버 (port 8080) ──────────────────────────────
+  # ncurses TUI 사용 — 반드시 docker compose run --rm server 로 실행
+  server:
+    build: .
+    container_name: renux_server
+    command: ./server_e
+    ports:
+      - "8080:8080"
+    stdin_open: true
+    tty: true
+    networks:
+      - renux_net
+
+  # ── renux 에이전트: 파일 감시 + 탐지 ────────────────────────────
+  agent:
+    build: .
+    container_name: renux_agent
+    command: sh -c "echo 'MASTER_IP=master' > /etc/renux.conf && echo 'MASTER_PORT=9000' >> /etc/renux.conf && ./renux"
+    depends_on:
+      - master
+    privileged: true          # /proc 접근 + inotify
+    networks:
+      - renux_net
+
+  # ── client_e: 관리 클라이언트 ─────────────────────────────────────
+  # docker compose run --rm client 로 인터랙티브 실행
+  client:
+    build: .
+    container_name: renux_client
+    command: ./client_e server 8080
+    stdin_open: true
+    tty: true
+    depends_on:
+      - server
+    networks:
+      - renux_net
+
+networks:
+  renux_net:
+    driver: bridge
