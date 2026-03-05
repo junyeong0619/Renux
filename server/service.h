@@ -1,19 +1,13 @@
-//
-// Created by Junyeong on 2025. 9. 2..
-//
-
 #ifndef SERVICE_H
 #define SERVICE_H
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <openssl/ssl.h>
 
 char *get_username(void);
-int is_valid_login(char *username, char *passwd, unsigned long server_passwd);
-void execute_command(char *command);
-void handle_client_request(int client_socket, char* buffer, const char* username);
+int   is_valid_login(char *username, char *passwd, const char *server_passwd_hash);
+void  handle_client_request(SSL *ssl, char *buffer, const char *username);
 
-
-
-
-#endif //SERVICE_H
+#endif // SERVICE_H
