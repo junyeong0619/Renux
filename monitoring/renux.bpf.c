@@ -66,27 +66,6 @@ static __always_inline bool is_webserver_comm(const char comm[16]) {
     return false;
 }
 
-/* Check if a path's basename matches a shell name */
-static __always_inline bool path_basename_is_shell(const char path[256]) {
-    /* Find last '/' */
-    int last_slash = -1;
-    for (int i = 0; i < 256; i++) {
-        if (path[i] == '\0') break;
-        if (path[i] == '/') last_slash = i;
-    }
-
-    /* Copy basename into a 16-byte buffer */
-    char base[16] = {};
-    int start = last_slash + 1;  /* [0, 256] */
-    for (int j = 0; j < 15; j++) {
-        int idx = start + j;
-        if (idx < 0 || idx >= 256) break;
-        char c = path[idx];
-        if (c == '\0') break;
-        base[j] = c;
-    }
-    return is_shell_comm(base);
-}
 
 /* Check if path starts with a monitored prefix */
 static __always_inline bool is_monitored_path(const char path[256]) {
@@ -107,10 +86,15 @@ static __always_inline bool is_monitored_path(const char path[256]) {
 SEC("tp/syscalls/sys_enter_execve")
 int trace_execve(struct trace_event_raw_sys_enter *ctx)
 {
+    /* 루프 없이 comm으로 판단: 쉘 프로세스가 execve를 호출할 때만 기록.
+     * path_basename_is_shell()의 256-byte 루프가 BPF verifier 명령어
+     * 한도(1,000,000)를 초과하므로 제거하고 bpf_get_current_comm() 사용. */
+    char comm[16] = {};
+    bpf_get_current_comm(comm, sizeof(comm));
+    if (!is_shell_comm(comm)) return 0;
+
     char path[256] = {};
     bpf_probe_read_user_str(path, sizeof(path), (const char *)ctx->args[0]);
-
-    if (!path_basename_is_shell(path)) return 0;
 
     struct renux_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e) return 0;
@@ -121,7 +105,7 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
     e->uid         = bpf_get_current_uid_gid() & 0xFFFFFFFF;
     e->remote_ip   = 0;
     e->remote_port = 0;
-    bpf_get_current_comm(e->comm, sizeof(e->comm));
+    __builtin_memcpy(e->comm, comm, sizeof(e->comm));
     __builtin_memcpy(e->path, path, sizeof(e->path));
 
     bpf_ringbuf_submit(e, 0);
