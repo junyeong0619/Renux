@@ -260,15 +260,15 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signal_handler);
 
     /* eBPF 로드 및 attach */
-    struct renux_bpf *skel = renux_bpf__open_and_load();
+    struct renux *skel = renux__open_and_load();
     if (!skel) {
         std::cerr << "[Error] Failed to load eBPF program. Kernel 5.8+ and CAP_BPF required." << std::endl;
         return 1;
     }
 
-    if (renux_bpf__attach(skel) < 0) {
+    if (renux__attach(skel) < 0) {
         std::cerr << "[Error] Failed to attach eBPF hooks." << std::endl;
-        renux_bpf__destroy(skel);
+        renux__destroy(skel);
         return 1;
     }
 
@@ -276,7 +276,7 @@ int main(int argc, char* argv[]) {
         bpf_map__fd(skel->maps.events), handle_event, nullptr, nullptr);
     if (!rb) {
         std::cerr << "[Error] Failed to create ring buffer." << std::endl;
-        renux_bpf__destroy(skel);
+        renux__destroy(skel);
         return 1;
     }
 
@@ -289,7 +289,7 @@ int main(int argc, char* argv[]) {
         ring_buffer__poll(rb, 100 /* ms */);
 
     ring_buffer__free(rb);
-    renux_bpf__destroy(skel);
+    renux__destroy(skel);
 
     if (master_ssl)  { SSL_shutdown(master_ssl); SSL_free(master_ssl); }
     if (g_ssl_ctx)   { SSL_CTX_free(g_ssl_ctx); }
