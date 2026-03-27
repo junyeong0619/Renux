@@ -38,6 +38,7 @@ const std::string MASTER_CERT_PATH = "/etc/renux/master.crt";
 
 // --- 전역 변수 ---
 volatile sig_atomic_t keep_running = 1;
+const int RECONNECT_INTERVAL_SEC = 10;  /* master 재연결 시도 주기 */
 
 std::string MY_IP     = "Unknown";
 std::string MASTER_IP = "";
@@ -225,6 +226,18 @@ void signal_handler(int /*sig*/) {
      * signal handler에서 async-signal-unsafe 함수 호출 금지. */
 }
 
+/* master 연결이 끊어졌을 때 주기적으로 재연결 시도 */
+void reconnect_loop() {
+    while (keep_running) {
+        for (int i = 0; i < RECONNECT_INTERVAL_SEC && keep_running; i++)
+            sleep(1);
+
+        std::lock_guard<std::mutex> lock(net_mutex);
+        if (master_sock == -1)
+            connect_to_master();
+    }
+}
+
 void handle_trace_command(const std::string& keyword) {
     std::ifstream file(AGENT_LOG_FILE);
     if (!file.is_open()) { std::cerr << "Cannot open log." << std::endl; return; }
@@ -282,6 +295,9 @@ int main(int argc, char* argv[]) {
 
     write_agent_log("--- Monitoring Started (eBPF) on Agent [" + MY_IP + "] ---");
     connect_to_master();
+
+    /* master 재연결 백그라운드 스레드 (10초마다 연결 끊기면 재시도) */
+    std::thread(reconnect_loop).detach();
 
     /* 이벤트 루프: ring_buffer__poll은 100ms timeout으로 대기.
      * 이벤트 발생 시 즉시 handle_event 콜백 호출. */
