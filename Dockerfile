@@ -7,6 +7,9 @@ RUN apt-get update -q && apt-get install -y \
     libssl-dev libcap-dev libncurses-dev \
     openssl expect iproute2 procps net-tools \
     netcat-openbsd socat \
+    clang llvm libbpf-dev \
+    linux-headers-generic linux-tools-generic \
+    libelf-dev zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /renux
