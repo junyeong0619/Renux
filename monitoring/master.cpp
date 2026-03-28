@@ -22,6 +22,7 @@
 #include <cstring>
 #include <ctime>
 #include <cstdio>
+#include <csignal>
 #include <algorithm>
 #include <set>
 #include <unistd.h>
@@ -1487,6 +1488,8 @@ void handle_client(int client_socket, struct sockaddr_in client_addr, SSL_CTX *s
 // ─────────────────────────────────────────────────────────────────────
 
 int main() {
+    signal(SIGPIPE, SIG_IGN);   /* SSL_shutdown on closed socket → SIGPIPE 무시 */
+
     SSL_CTX *ssl_ctx = create_server_ssl_ctx(MASTER_CERT, MASTER_KEY);
     if (!ssl_ctx) {
         fprintf(stderr, "TLS init failed. Check %s & %s\n", MASTER_CERT, MASTER_KEY);
