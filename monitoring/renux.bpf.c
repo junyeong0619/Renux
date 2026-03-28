@@ -117,12 +117,14 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
     {                                                                        \
         const char *_ap = NULL;                                              \
         bpf_probe_read_user(&_ap, sizeof(_ap), argv_ptr + (N));             \
-        if (_ap) {                                                           \
-            if (pos > 0 && pos < 127) { e->args[pos] = ' '; pos++; }       \
+        if (_ap && pos >= 0 && pos < (int)(sizeof(e->args) - 1)) {         \
+            if (pos > 0) { e->args[pos] = ' '; pos++; }                    \
             int _n = bpf_probe_read_user_str(e->args + pos,                 \
                          sizeof(e->args) - pos < 30                         \
                              ? sizeof(e->args) - pos : 30, _ap);            \
             if (_n > 1) pos += _n - 1;                                      \
+            if (pos < 0 || pos >= (int)sizeof(e->args))                     \
+                pos = (int)sizeof(e->args) - 1;                             \
         }                                                                    \
     }
 
