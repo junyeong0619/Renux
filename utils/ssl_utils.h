@@ -16,9 +16,15 @@ extern "C" {
 /* djb2 해시 — 하위 호환용, 보안 목적으로는 아래 SHA-256 함수를 사용할 것 */
 unsigned long hash_string(const char *str);
 
-/* SHA-256 기반 해싱 / 검증 */
+/* SHA-256 기반 해싱 / 검증 (하위 호환용) */
 void hash_password(const char *plain, char out_hex[65]);
 int  verify_password(const char *plain, const char *stored_hex);
+
+/* Salt + PBKDF2-SHA256 (10000 iter) 해싱 / 검증
+ * 저장 포맷: "<32-hex-salt>:<64-hex-hash>"  (총 97자 + null = 98바이트)
+ * out 버퍼는 최소 98바이트여야 함 */
+void hash_password_salted(const char *plain, char out[98]);
+int  verify_password_salted(const char *plain, const char *stored);
 
 /* ------------------------------------------------------------------ */
 /*  TLS 컨텍스트                                                        */

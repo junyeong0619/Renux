@@ -160,13 +160,13 @@ int main(int argc, char *argv[]) {
     else
         get_server_password(server_passwd_plain);
 
-    char server_passwd_hash[65];
-    hash_password(server_passwd_plain, server_passwd_hash);
+    char server_passwd_hash[98];
+    hash_password_salted(server_passwd_plain, server_passwd_hash);
     memset(server_passwd_plain, 0, sizeof(server_passwd_plain));
 
     char hashed_msg[100];
     snprintf(hashed_msg, sizeof(hashed_msg),
-             "Password hashed (SHA-256): %.16s...", server_passwd_hash);
+             "Password hashed (PBKDF2-SHA256): %.16s...", server_passwd_hash);
     display_server_log(hashed_msg);
 
     /* ── kqueue / epoll 초기화 ───────────────────────────────────── */

@@ -130,6 +130,10 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
     READ_ARG(2)
     READ_ARG(3)
     READ_ARG(4)
+    READ_ARG(5)
+    READ_ARG(6)
+    READ_ARG(7)
+    READ_ARG(8)
 #undef READ_ARG
 
     bpf_ringbuf_submit(e, 0);

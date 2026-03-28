@@ -2,6 +2,14 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <openssl/rand.h>
+#include <openssl/evp.h>
+
+#define PBKDF2_ITER   10000
+#define SALT_BYTES    16
+#define SALT_HEX_LEN  32   /* SALT_BYTES * 2 */
+#define HASH_BYTES    32
+#define HASH_HEX_LEN  64   /* HASH_BYTES * 2 */
 
 /* ------------------------------------------------------------------ */
 /*  djb2 해시 (하위 호환)                                               */
@@ -42,6 +50,71 @@ int verify_password(const char *plain, const char *stored_hex) {
     char computed[65];
     hash_password(plain, computed);
     return (strcmp(computed, stored_hex) == 0) ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Salt + PBKDF2-SHA256 해싱                                          */
+/*  저장 포맷: "<32-hex-salt>:<64-hex-hash>"                           */
+/* ------------------------------------------------------------------ */
+
+void hash_password_salted(const char *plain, char out[98]) {
+    unsigned char salt[SALT_BYTES];
+    unsigned char digest[HASH_BYTES];
+
+    if (RAND_bytes(salt, SALT_BYTES) != 1) {
+        out[0] = '\0';
+        return;
+    }
+
+    PKCS5_PBKDF2_HMAC(plain, (int)strlen(plain),
+                      salt, SALT_BYTES,
+                      PBKDF2_ITER,
+                      EVP_sha256(),
+                      HASH_BYTES, digest);
+
+    /* salt hex */
+    for (int i = 0; i < SALT_BYTES; i++)
+        snprintf(out + i * 2, 3, "%02x", salt[i]);
+    out[SALT_HEX_LEN] = ':';
+
+    /* hash hex */
+    for (int i = 0; i < HASH_BYTES; i++)
+        snprintf(out + SALT_HEX_LEN + 1 + i * 2, 3, "%02x", digest[i]);
+    out[SALT_HEX_LEN + 1 + HASH_HEX_LEN] = '\0';
+}
+
+int verify_password_salted(const char *plain, const char *stored) {
+    /* stored 포맷 검증: 97자 + ':' 위치 확인 */
+    if (!stored || strlen(stored) != (SALT_HEX_LEN + 1 + HASH_HEX_LEN))
+        return 0;
+    if (stored[SALT_HEX_LEN] != ':')
+        return 0;
+
+    /* salt 복원 */
+    unsigned char salt[SALT_BYTES];
+    for (int i = 0; i < SALT_BYTES; i++) {
+        unsigned int byte;
+        sscanf(stored + i * 2, "%02x", &byte);
+        salt[i] = (unsigned char)byte;
+    }
+
+    /* PBKDF2 재계산 */
+    unsigned char digest[HASH_BYTES];
+    PKCS5_PBKDF2_HMAC(plain, (int)strlen(plain),
+                      salt, SALT_BYTES,
+                      PBKDF2_ITER,
+                      EVP_sha256(),
+                      HASH_BYTES, digest);
+
+    /* 상수 시간 비교 */
+    char computed_hex[HASH_HEX_LEN + 1];
+    for (int i = 0; i < HASH_BYTES; i++)
+        snprintf(computed_hex + i * 2, 3, "%02x", digest[i]);
+    computed_hex[HASH_HEX_LEN] = '\0';
+
+    return (CRYPTO_memcmp(computed_hex,
+                          stored + SALT_HEX_LEN + 1,
+                          HASH_HEX_LEN) == 0) ? 1 : 0;
 }
 
 /* ------------------------------------------------------------------ */

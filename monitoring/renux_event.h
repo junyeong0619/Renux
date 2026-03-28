@@ -26,7 +26,7 @@ struct renux_event {
     __u32 uid;            /* effective UID                              */
     char  comm[16];       /* process comm (TASK_COMM_LEN)               */
     char  path[256];      /* execve: filename, openat: file path        */
-    char  args[128];      /* execve: argv[1..4] space-joined            */
+    char  args[256];      /* execve: argv[1..8] space-joined            */
     __u32 remote_ip;      /* tcp_connect: dest IP (network byte order)  */
     __u16 remote_port;    /* tcp_connect: dest port (network byte order)*/
 } __attribute__((packed));

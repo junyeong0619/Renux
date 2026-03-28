@@ -98,7 +98,7 @@ int is_valid_login(char *username, char *passwd, const char *server_passwd_hash)
     int is_user_valid = (strcmp(username, target_username) == 0);
     free(target_username);
 
-    if (is_user_valid && verify_password(passwd, server_passwd_hash)) return 0;
+    if (is_user_valid && verify_password_salted(passwd, server_passwd_hash)) return 0;
     return -1;
 }
 

@@ -41,6 +41,9 @@
 #define MASTER_CERT "/etc/renux/master.crt"
 #define MASTER_KEY  "/etc/renux/master.key"
 
+#define MIN_ROWS 10
+#define MIN_COLS 40
+
 #define CP_BORDER_NORMAL  1
 #define CP_BORDER_ALERT   2
 #define CP_TITLE_NORMAL   3
@@ -381,6 +384,13 @@ static void show_overlay(const std::string& title, const std::vector<std::string
         if (ch == KEY_END)  scroll = std::max(0, total - view_h + 1);
         if (ch == KEY_RESIZE) {
             getmaxyx(stdscr, rows, cols);
+            if (rows < MIN_ROWS || cols < MIN_COLS) {
+                werase(win);
+                mvwprintw(win, 0, 0, "Terminal too small (%dx%d min %dx%d)",
+                          cols, rows, MIN_COLS, MIN_ROWS);
+                wrefresh(win);
+                continue;
+            }
             wresize(win, rows, cols);
             view_h = rows - 2;
         }
@@ -803,6 +813,13 @@ static void run_dashboard(const std::vector<std::string>& ips) {
         }
         if (ch == KEY_RESIZE) {
             getmaxyx(stdscr, rows, cols);
+            if (rows < MIN_ROWS || cols < MIN_COLS) {
+                clear();
+                mvprintw(0, 0, "Terminal too small (%dx%d min %dx%d)",
+                         cols, rows, MIN_COLS, MIN_ROWS);
+                refresh();
+                continue;
+            }
             for (auto w : wins) delwin(w);
             wins.clear();
             layouts = calc_layout(n, rows, cols);
