@@ -108,26 +108,19 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
     __builtin_memcpy(e->comm, comm, sizeof(e->comm));
     __builtin_memcpy(e->path, path, sizeof(e->path));
 
-    /* argv[1..4] 읽기: 매크로로 unroll — verifier 루프/명령어 한도 우회 */
+    /* argv[1..4]: 고정 슬롯(30 bytes each) — 컴파일 타임 오프셋으로 verifier 통과
+     * slot layout: args[0..29]=argv[1], args[30..59]=argv[2], ...
+     * 동적 pos 누적 방식은 running-pointer 최적화로 인해 verifier가
+     * max(ptr)+max(size) > ringbuf_size 로 거부함. */
     const char **argv_ptr = (const char **)ctx->args[1];
     __builtin_memset(e->args, 0, sizeof(e->args));
-    int pos = 0;
 
 #define READ_ARG(N)                                                          \
     {                                                                        \
         const char *_ap = NULL;                                              \
         bpf_probe_read_user(&_ap, sizeof(_ap), argv_ptr + (N));             \
-        if (_ap) {                                                           \
-            if (pos > 0 && pos < 127) {                                     \
-                e->args[pos & 0x7f] = ' ';  /* mask: verifier 0..127 */    \
-                pos = (pos + 1) & 0x7f;                                     \
-            }                                                                \
-            int _safe = 128 - (pos & 0x7f); /* remaining space: 1..128 */  \
-            int _n = bpf_probe_read_user_str(e->args + (pos & 0x7f),       \
-                         _safe < 30 ? _safe : 30, _ap);                     \
-            if (_n > 1) pos += _n - 1;                                      \
-            pos &= 0x7f; /* re-establish bounds for verifier */             \
-        }                                                                    \
+        if (_ap)                                                             \
+            bpf_probe_read_user_str(e->args + ((N) - 1) * 30, 30, _ap);    \
     }
 
     READ_ARG(1)

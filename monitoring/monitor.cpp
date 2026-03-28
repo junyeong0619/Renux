@@ -182,8 +182,17 @@ static int handle_event(void * /*ctx*/, void *data, size_t /*sz*/) {
                           " uid=" + std::to_string(e->uid) +
                           " comm=" + e->comm +
                           " path=" + e->path;
-        if (e->args[0] != '\0')
-            msg += std::string(" args=") + e->args;
+        if (e->args[0] != '\0') {
+            /* args는 30바이트 고정 슬롯: argv[1]@0, argv[2]@30, argv[3]@60, argv[4]@90 */
+            std::string args_out;
+            for (int _i = 0; _i < 4; _i++) {
+                const char *slot = e->args + _i * 30;
+                if (slot[0] == '\0') break;
+                if (!args_out.empty()) args_out += ' ';
+                args_out += std::string(slot, strnlen(slot, 30));
+            }
+            msg += " args=" + args_out;
+        }
         write_agent_log(msg);
         break;
     }
