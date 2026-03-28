@@ -1,11 +1,13 @@
 /**
- * Renux Master Server - V2.5
+ * Renux Master Server - V2.6
  * 신규:
  *   - Geolocation: REVERSE_SHELL 탐지 시 원격 IP 위치 자동 조회
  *   - Risk Score : 이벤트 가중치 누적 (0-100, LOW/MEDIUM/HIGH/CRITICAL)
  *   - Alert Burst: 30초 내 3회 이상 ALERT → CRITICAL 격상
  *   - stats [ip]  : 에이전트별 이벤트 통계 + ASCII 바 차트
  *   - Heartbeat  : list에 마지막 수신 시간 표시
+ *   - Per-agent log: agents/{ip}.log 에 에이전트별 로그 분리 저장
+ *   - Graph mode : tm 대시보드에서 [g] 키로 로그 뷰 <-> 실시간 그래프 전환
  */
 
 #include <fstream>
@@ -25,6 +27,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <ncurses.h>
 #include <clocale>
 #include "../utils/ssl_utils.h"
@@ -70,6 +73,9 @@ struct AgentData {
 
     /* 버스트 감지용 ALERT 타임스탬프 */
     std::deque<std::time_t> alert_ts;
+
+    /* 그래프용: 최근 GRAPH_WINDOW_SEC 초 내 이벤트 타임스탬프 */
+    std::deque<std::time_t> event_times;
 };
 
 std::mutex agent_data_mutex;
@@ -78,6 +84,9 @@ std::mutex log_file_mutex;
 
 const std::string MASTER_LOG_FILE = "central_renux.log";
 const std::string TAG_FILE        = "renux_tags.conf";
+const std::string AGENT_LOG_DIR   = "agents";         /* 에이전트별 로그 디렉토리 */
+
+#define GRAPH_WINDOW_SEC  60   /* 그래프 표시 시간 범위 (초) */
 
 std::set<std::string>            connected_agents;
 std::map<std::string, AgentData> agent_data;
@@ -395,16 +404,24 @@ static std::string extract_remote_ip(const std::string& msg) {
 }
 
 void log_message(const std::string& ip, const std::string& msg) {
-    /* 파일 저장 */
+    std::time_t now = std::time(nullptr);
+    char tbuf[32];
+    std::strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+
+    /* central 파일 저장 */
     {
         std::lock_guard<std::mutex> lk(log_file_mutex);
         std::ofstream f(MASTER_LOG_FILE, std::ios::app);
-        if (f.is_open()) {
-            std::time_t now = std::time(nullptr);
-            char tbuf[32];
-            std::strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+        if (f.is_open())
             f << "[" << tbuf << "] [Agent: " << ip << "] " << msg << "\n";
-        }
+
+        /* per-agent 파일 저장: agents/{ip}.log */
+        std::string safe_ip = ip;
+        std::replace(safe_ip.begin(), safe_ip.end(), ':', '_'); /* IPv6 대비 */
+        std::string agent_path = AGENT_LOG_DIR + "/" + safe_ip + ".log";
+        std::ofstream af(agent_path, std::ios::app);
+        if (af.is_open())
+            af << "[" << tbuf << "] " << msg << "\n";
     }
 
     /* per-agent 업데이트 */
@@ -420,6 +437,12 @@ void log_message(const std::string& ip, const std::string& msg) {
         d.logs.push_back(msg);
         if (d.logs.size() > MAX_LOG_LINES) d.logs.pop_front();
         d.last_seen = std::time(nullptr);
+
+        /* 그래프용 이벤트 타임라인 업데이트 */
+        d.event_times.push_back(now);
+        while (!d.event_times.empty() &&
+               now - d.event_times.front() > GRAPH_WINDOW_SEC)
+            d.event_times.pop_front();
 
         /* 위험도 가중치 */
         if (is_reverse)       { d.risk = std::min(100, d.risk + 30); d.cnt_reverse++;  }
@@ -505,6 +528,62 @@ void update_agent_status(const std::string& ip, bool connected) {
 
 struct PanelLayout { int y, x, h, w; };
 
+/* 그래프 모드 전역 플래그 (run_dashboard에서만 읽기/쓰기 → 별도 뮤텍스 불필요) */
+static bool g_graph_mode = false;
+
+/* 패널 내부에 실시간 이벤트 빈도 막대그래프 렌더링
+ * event_times : 최근 GRAPH_WINDOW_SEC 초 내 타임스탬프 deque
+ * area_h, area_w : 그릴 수 있는 내부 영역 (테두리/헤더 제외) */
+static void draw_graph(WINDOW *win, const AgentData& d,
+                       int start_row, int area_h, int area_w) {
+    if (area_h <= 0 || area_w <= 0) return;
+
+    /* 버킷 수 = 패널 너비 (1열 = 1버킷 = GRAPH_WINDOW_SEC/area_w 초) */
+    int n_buckets = area_w;
+    std::vector<int> buckets(n_buckets, 0);
+
+    std::time_t now = std::time(nullptr);
+    for (auto t : d.event_times) {
+        int age = (int)(now - t);           /* 몇 초 전 */
+        if (age < 0 || age >= GRAPH_WINDOW_SEC) continue;
+        /* 오래된 이벤트 = 왼쪽, 최신 = 오른쪽 */
+        int idx = (int)((double)(GRAPH_WINDOW_SEC - 1 - age)
+                        / GRAPH_WINDOW_SEC * n_buckets);
+        if (idx >= 0 && idx < n_buckets) buckets[idx]++;
+    }
+
+    int max_val = *std::max_element(buckets.begin(), buckets.end());
+    if (max_val == 0) max_val = 1;  /* division guard */
+
+    /* 위에서 아래로 채우는 막대그래프 */
+    for (int col = 0; col < n_buckets && col < area_w; col++) {
+        int bar_h = (int)((double)buckets[col] / max_val * area_h);
+        for (int row = 0; row < area_h; row++) {
+            int scr_row = start_row + (area_h - 1 - row);
+            if (row < bar_h) {
+                /* 높이에 따라 색상 차별화 */
+                double ratio = (double)row / area_h;
+                int cp = (ratio > 0.7) ? CP_CRITICAL
+                       : (ratio > 0.4) ? CP_RISK_HIGH
+                                       : CP_RISK_LOW;
+                wattron(win, COLOR_PAIR(cp) | A_BOLD);
+                mvwaddch(win, scr_row, 1 + col, ACS_BLOCK);
+                wattroff(win, COLOR_PAIR(cp) | A_BOLD);
+            } else {
+                mvwaddch(win, scr_row, 1 + col, ' ');
+            }
+        }
+    }
+
+    /* 하단 시간 눈금: "60s ago" ... "now" */
+    if (start_row + area_h < getmaxy(win) - 1) {
+        wattron(win, A_DIM);
+        mvwprintw(win, start_row + area_h, 1, "%-*s", area_w - 8, "60s ago");
+        mvwprintw(win, start_row + area_h, 1 + area_w - 4, "now");
+        wattroff(win, A_DIM);
+    }
+}
+
 static std::vector<PanelLayout> calc_layout(int n, int rows, int cols) {
     int u = rows - 1;
     std::vector<PanelLayout> L;
@@ -554,29 +633,37 @@ static void draw_panel(WINDOW *win, const std::string& ip, const AgentData& d) {
     mvwprintw(win, 0, tx, "%s", title.c_str());
     wattroff(win, COLOR_PAIR(title_cp) | A_BOLD);
 
-    /* 위험도 표시 (2행) */
+    /* 위험도 + 모드 표시 (1행) */
     if (h > 4) {
-        char rbuf[32];
-        snprintf(rbuf, sizeof(rbuf), " RISK:%d [%s] ", d.risk, risk_label(d.risk));
+        char rbuf[48];
+        snprintf(rbuf, sizeof(rbuf), " RISK:%d [%s]%s ",
+                 d.risk, risk_label(d.risk),
+                 g_graph_mode ? " | GRAPH" : "");
         int rx = std::max(1, (w - (int)strlen(rbuf)) / 2);
         wattron(win, COLOR_PAIR(risk_color(d.risk)) | A_BOLD);
         mvwprintw(win, 1, rx, "%s", rbuf);
         wattroff(win, COLOR_PAIR(risk_color(d.risk)) | A_BOLD);
     }
 
-    /* 로그 라인 (2행 이후부터) */
-    int log_start_row = (h > 4) ? 2 : 1;
-    int ch = h - log_start_row - 1;
-    int cw = w - 2;
-    int start = (int)d.logs.size() > ch ? (int)d.logs.size() - ch : 0;
+    int content_start = (h > 4) ? 2 : 1;
+    int area_h = h - content_start - 1;   /* 테두리 하단 1줄 제외 */
+    int area_w = w - 2;
 
-    for (int i = 0; i < ch && start + i < (int)d.logs.size(); i++) {
-        std::string line = d.logs[start + i];
-        if ((int)line.size() > cw) line = line.substr(0, cw);
-        bool la = (line.find("ALERT:") != std::string::npos);
-        if (la) wattron(win, COLOR_PAIR(CP_LINE_ALERT) | A_BOLD);
-        mvwprintw(win, log_start_row + i, 1, "%-*s", cw, line.c_str());
-        if (la) wattroff(win, COLOR_PAIR(CP_LINE_ALERT) | A_BOLD);
+    if (g_graph_mode) {
+        /* 그래프 뷰 */
+        draw_graph(win, d, content_start, area_h, area_w);
+    } else {
+        /* 로그 뷰 */
+        int start = (int)d.logs.size() > area_h
+                    ? (int)d.logs.size() - area_h : 0;
+        for (int i = 0; i < area_h && start + i < (int)d.logs.size(); i++) {
+            std::string line = d.logs[start + i];
+            if ((int)line.size() > area_w) line = line.substr(0, area_w);
+            bool la = (line.find("ALERT:") != std::string::npos);
+            if (la) wattron(win, COLOR_PAIR(CP_LINE_ALERT) | A_BOLD);
+            mvwprintw(win, content_start + i, 1, "%-*s", area_w, line.c_str());
+            if (la) wattroff(win, COLOR_PAIR(CP_LINE_ALERT) | A_BOLD);
+        }
     }
     wrefresh(win);
 }
@@ -593,7 +680,7 @@ static void draw_statusbar_tm(int rows, int cols,
     if (n_critical > 0)
         left += "  !! CRITICAL:" + std::to_string(n_critical) + " !!";
 
-    std::string right = "[c]lear  [q]uit ";
+    std::string right = std::string(g_graph_mode ? "[g]log " : "[g]graph ") + "[c]lear  [q]uit ";
     int pad = cols - (int)left.size() - (int)right.size();
     std::string bar = left + std::string(std::max(0, pad), ' ') + right;
     if ((int)bar.size() > cols) bar = bar.substr(0, cols);
@@ -624,6 +711,9 @@ static void run_dashboard(const std::vector<std::string>& ips) {
     while (true) {
         int ch = getch();
         if (ch == 'q' || ch == 'Q') break;
+        if (ch == 'g' || ch == 'G') {
+            g_graph_mode = !g_graph_mode;
+        }
         if (ch == 'c' || ch == 'C') {
             std::lock_guard<std::mutex> lk(agent_data_mutex);
             for (auto& ip : ips) {
@@ -1173,6 +1263,9 @@ int main() {
     address.sin_port        = htons(PORT);
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) { perror("bind"); return 1; }
     if (listen(server_fd, 10) < 0) { perror("listen"); return 1; }
+
+    /* per-agent 로그 디렉토리 생성 */
+    mkdir(AGENT_LOG_DIR.c_str(), 0755);
 
     load_tags();
     init_ui();
