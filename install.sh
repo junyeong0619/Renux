@@ -171,6 +171,33 @@ build_slave() {
     ok "Slave 빌드 완료: renux"
 }
 
+# ── TLS 인증서 생성 ───────────────────────────────────────────────────
+
+generate_master_cert() {
+    CERT_DIR="/etc/renux"
+    CERT_FILE="${CERT_DIR}/master.crt"
+    KEY_FILE="${CERT_DIR}/master.key"
+
+    mkdir -p "${CERT_DIR}"
+
+    if [ -f "${CERT_FILE}" ] && [ -f "${KEY_FILE}" ]; then
+        warn "인증서가 이미 존재합니다: ${CERT_FILE}"
+        read -p "  재생성하시겠습니까? [y/N]: " REGEN
+        [ "${REGEN}" = "y" ] || [ "${REGEN}" = "Y" ] || return 0
+    fi
+
+    info "TLS 인증서 생성 중..."
+    openssl req -x509 -newkey rsa:2048 \
+        -keyout "${KEY_FILE}" \
+        -out    "${CERT_FILE}" \
+        -days 730 -nodes \
+        -subj "/CN=renux-master/O=Renux" 2>/dev/null
+
+    chmod 600 "${KEY_FILE}"
+    chmod 644 "${CERT_FILE}"
+    ok "인증서 생성 완료: ${CERT_FILE}"
+}
+
 # ── systemd 서비스 등록 ───────────────────────────────────────────────
 
 MASTER_IP_INPUT=""
@@ -314,6 +341,7 @@ main() {
                 yum) install_deps_master_yum ;;
             esac
             build_master
+            generate_master_cert
             setup_master_service
             echo ""
             ok "=== Master 설치 완료 ==="
