@@ -118,11 +118,15 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
         const char *_ap = NULL;                                              \
         bpf_probe_read_user(&_ap, sizeof(_ap), argv_ptr + (N));             \
         if (_ap) {                                                           \
-            if (pos > 0 && pos < 127) { e->args[pos] = ' '; pos++; }       \
-            int _n = bpf_probe_read_user_str(e->args + pos,                 \
-                         sizeof(e->args) - pos < 30                         \
-                             ? sizeof(e->args) - pos : 30, _ap);            \
+            if (pos > 0 && pos < 127) {                                     \
+                e->args[pos & 0x7f] = ' ';  /* mask: verifier 0..127 */    \
+                pos = (pos + 1) & 0x7f;                                     \
+            }                                                                \
+            int _safe = 128 - (pos & 0x7f); /* remaining space: 1..128 */  \
+            int _n = bpf_probe_read_user_str(e->args + (pos & 0x7f),       \
+                         _safe < 30 ? _safe : 30, _ap);                     \
             if (_n > 1) pos += _n - 1;                                      \
+            pos &= 0x7f; /* re-establish bounds for verifier */             \
         }                                                                    \
     }
 
