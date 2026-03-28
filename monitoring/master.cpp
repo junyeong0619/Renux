@@ -338,6 +338,165 @@ void update_agent_status(const std::string& ip, bool connected) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+//  인터랙티브 태그 UI (UI 스레드 전용)
+// ─────────────────────────────────────────────────────────────────────
+
+/* 화면의 특정 위치에서 문자열을 한 글자씩 입력받는다 (ESC로 취소) */
+static std::string read_string_at(int y, int x, int maxlen) {
+    char buf[256] = {};
+    int  pos = 0;
+    curs_set(1);
+    timeout(-1);
+
+    while (true) {
+        mvprintw(y, x, "> %-*s", maxlen, buf);
+        move(y, x + 2 + pos);
+        refresh();
+
+        int ch = getch();
+        if (ch == '\n' || ch == KEY_ENTER) break;
+        if (ch == 27)  { buf[0] = '\0'; break; }   /* ESC: 취소 */
+        if ((ch == KEY_BACKSPACE || ch == 127) && pos > 0) buf[--pos] = '\0';
+        else if (ch >= 32 && ch < 127 && pos < maxlen - 1) buf[pos++] = (char)ch;
+    }
+    curs_set(0);
+    return std::string(buf);
+}
+
+static void cmd_tag_interactive() {
+    std::vector<std::string> agents;
+    {
+        std::lock_guard<std::mutex> lk(clients_mutex);
+        agents.assign(connected_agents.begin(), connected_agents.end());
+    }
+    if (agents.empty()) {
+        ui_enqueue("No connected agents.", CP_SYSTEM, true);
+        return;
+    }
+
+    curs_set(0);
+    int cursor = 0;
+    std::string selected_ip;
+
+    /* ── 에이전트 선택 ── */
+    while (true) {
+        clear();
+        attron(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
+        mvhline(0, 0, ' ', COLS);
+        mvprintw(0, 2, " Tag Agent - Select agent to tag");
+        attroff(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
+        mvprintw(1, 2, "UP/DOWN: move  ENTER: select  q: cancel");
+
+        for (int i = 0; i < (int)agents.size(); i++) {
+            std::string cur_tag;
+            {
+                std::lock_guard<std::mutex> lk(tag_mutex);
+                auto it = g_ip_to_tag.find(agents[i]);
+                if (it != g_ip_to_tag.end()) cur_tag = "  [" + it->second + "]";
+            }
+            if (i == cursor) attron(A_REVERSE);
+            attron(COLOR_PAIR(CP_TITLE_NORMAL));
+            mvprintw(i + 3, 4, "%-18s", agents[i].c_str());
+            attroff(COLOR_PAIR(CP_TITLE_NORMAL));
+            printw("%s", cur_tag.c_str());
+            if (i == cursor) attroff(A_REVERSE);
+        }
+        refresh();
+
+        int ch = getch();
+        if (ch == 'q' || ch == 'Q') goto done;
+        if (ch == KEY_UP)   cursor = std::max(0, cursor - 1);
+        if (ch == KEY_DOWN) cursor = std::min((int)agents.size() - 1, cursor + 1);
+        if (ch == '\n' || ch == KEY_ENTER) { selected_ip = agents[cursor]; break; }
+    }
+
+    /* ── 이름 입력 ── */
+    {
+        clear();
+        attron(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
+        mvhline(0, 0, ' ', COLS);
+        mvprintw(0, 2, " Tag Agent - Enter name for %s", selected_ip.c_str());
+        attroff(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
+        mvprintw(2, 4, "Tag name (ESC to cancel):");
+        refresh();
+
+        std::string name = read_string_at(3, 4, 32);
+        if (!name.empty()) {
+            {
+                std::lock_guard<std::mutex> lk(tag_mutex);
+                auto old = g_ip_to_tag.find(selected_ip);
+                if (old != g_ip_to_tag.end()) g_tag_to_ip.erase(old->second);
+                g_tag_to_ip[name]       = selected_ip;
+                g_ip_to_tag[selected_ip] = name;
+            }
+            save_tags();
+            ui_enqueue("Tagged: " + selected_ip + " -> " + name, CP_SYSTEM, true);
+        }
+    }
+
+done:
+    restore_ui();
+    keypad(g_cmd_win, TRUE);
+    wtimeout(g_cmd_win, 100);
+}
+
+static void cmd_untag_interactive() {
+    std::vector<std::pair<std::string, std::string>> tagged;   /* name, ip */
+    {
+        std::lock_guard<std::mutex> lk(tag_mutex);
+        for (auto& [name, ip] : g_tag_to_ip)
+            tagged.push_back({name, ip});
+    }
+    if (tagged.empty()) {
+        ui_enqueue("No tags defined.", CP_SYSTEM, true);
+        return;
+    }
+
+    curs_set(0);
+    int cursor = 0;
+
+    while (true) {
+        clear();
+        attron(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
+        mvhline(0, 0, ' ', COLS);
+        mvprintw(0, 2, " Untag Agent - Select tag to remove");
+        attroff(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
+        mvprintw(1, 2, "UP/DOWN: move  ENTER: remove  q: cancel");
+
+        for (int i = 0; i < (int)tagged.size(); i++) {
+            if (i == cursor) attron(A_REVERSE);
+            attron(COLOR_PAIR(CP_SELECTED));
+            mvprintw(i + 3, 4, "%-15s", tagged[i].first.c_str());
+            attroff(COLOR_PAIR(CP_SELECTED));
+            printw(" -> %s", tagged[i].second.c_str());
+            if (i == cursor) attroff(A_REVERSE);
+        }
+        refresh();
+
+        int ch = getch();
+        if (ch == 'q' || ch == 'Q') break;
+        if (ch == KEY_UP)   cursor = std::max(0, cursor - 1);
+        if (ch == KEY_DOWN) cursor = std::min((int)tagged.size() - 1, cursor + 1);
+        if (ch == '\n' || ch == KEY_ENTER) {
+            std::string name = tagged[cursor].first;
+            std::string ip   = tagged[cursor].second;
+            {
+                std::lock_guard<std::mutex> lk(tag_mutex);
+                g_ip_to_tag.erase(ip);
+                g_tag_to_ip.erase(name);
+            }
+            save_tags();
+            ui_enqueue("Removed tag: " + name + " (" + ip + ")", CP_SYSTEM, true);
+            break;
+        }
+    }
+
+    restore_ui();
+    keypad(g_cmd_win, TRUE);
+    wtimeout(g_cmd_win, 100);
+}
+
+// ─────────────────────────────────────────────────────────────────────
 //  TUI Dashboard (tm)
 // ─────────────────────────────────────────────────────────────────────
 
@@ -680,10 +839,12 @@ void command_shell() {
                 ui_enqueue("------------------------------");
 
             } else if (cmd == "tag") {
-                cmd_tag(arg1, arg2);
+                if (arg1.empty()) cmd_tag_interactive();
+                else              cmd_tag(arg1, arg2);
 
             } else if (cmd == "untag") {
-                cmd_untag(arg1);
+                if (arg1.empty()) cmd_untag_interactive();
+                else              cmd_untag(arg1);
 
             } else if (cmd == "tags") {
                 cmd_tags();
@@ -713,8 +874,8 @@ void command_shell() {
 
             } else if (cmd == "help") {
                 ui_enqueue("  list                 : 연결된 에이전트 목록", CP_SYSTEM, false);
-                ui_enqueue("  tag <ip> <name>      : 에이전트에 이름 태그 지정", CP_SYSTEM, false);
-                ui_enqueue("  untag <name>         : 태그 제거", CP_SYSTEM, false);
+                ui_enqueue("  tag [<ip> <name>]    : 태그 지정 (인수 없으면 선택 UI)", CP_SYSTEM, false);
+                ui_enqueue("  untag [<name>]       : 태그 제거 (인수 없으면 선택 UI)", CP_SYSTEM, false);
                 ui_enqueue("  tags                 : 태그 목록", CP_SYSTEM, false);
                 ui_enqueue("  tm                   : Trace Monitor 대시보드", CP_SYSTEM, false);
                 ui_enqueue("  trace-log <ip|tag>   : 에이전트 전체 로그 조회", CP_SYSTEM, false);
