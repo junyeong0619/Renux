@@ -534,6 +534,43 @@ void update_agent_status(const std::string& ip, bool connected) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+//  Risk Score 비율 감쇠 (exponential decay)
+// ─────────────────────────────────────────────────────────────────────
+
+#define DECAY_INTERVAL_SEC  60      /* 감쇠 주기 (초) */
+#define DECAY_FACTOR        0.7     /* 주기마다 risk × 0.7 */
+#define RISK_MIN_THRESHOLD  2       /* 이 값 이하면 0으로 정리 */
+
+void risk_decay_loop() {
+    while (true) {
+        /* DECAY_INTERVAL_SEC 동안 1초씩 쪼개서 sleep (종료 시 빠른 반응 위해) */
+        for (int i = 0; i < DECAY_INTERVAL_SEC; i++) sleep(1);
+
+        std::time_t now = std::time(nullptr);
+        std::lock_guard<std::mutex> lk(agent_data_mutex);
+        for (auto& [ip, d] : agent_data) {
+            /* risk 감쇠 */
+            if (d.risk > 0) {
+                d.risk = (int)(d.risk * DECAY_FACTOR);
+                if (d.risk <= RISK_MIN_THRESHOLD) d.risk = 0;
+            }
+
+            /* burst 윈도우 만료 시 CRITICAL 자동 해제 */
+            if (d.critical) {
+                while (!d.alert_ts.empty() &&
+                       now - d.alert_ts.front() > BURST_WINDOW)
+                    d.alert_ts.pop_front();
+                if (d.alert_ts.size() < (size_t)BURST_THRESH) {
+                    d.critical = false;
+                    ui_enqueue("[SYSTEM] CRITICAL cleared: " + display_name(ip),
+                               CP_SYSTEM, true);
+                }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
 //  TUI Dashboard (tm)
 // ─────────────────────────────────────────────────────────────────────
 
@@ -1322,6 +1359,7 @@ int main() {
     ui_enqueue("Renux Master started on port " + std::to_string(PORT), CP_SYSTEM, true);
 
     std::thread(command_shell).detach();
+    std::thread(risk_decay_loop).detach();
 
     while (true) {
         struct sockaddr_in client_addr;
