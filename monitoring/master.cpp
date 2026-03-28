@@ -29,6 +29,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <ncurses.h>
 #include <clocale>
 #include "../utils/ssl_utils.h"
@@ -1353,6 +1354,181 @@ static void cmd_replay(const std::string& target) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+//  delete-log: 기간 선택 후 에이전트 로그 삭제
+// ─────────────────────────────────────────────────────────────────────
+
+/* log_path 에서 cutoff_epoch 이전 항목을 삭제하고 덮어씀.
+ * cutoff_epoch == 0 이면 전체 삭제.
+ * 삭제 라인 수를 반환. */
+static int delete_log_file(const std::string& log_path, std::time_t cutoff_epoch) {
+    std::ifstream in(log_path);
+    if (!in.is_open()) return -1;
+
+    std::vector<std::string> keep;
+    std::string line;
+    int removed = 0;
+    while (std::getline(in, line)) {
+        if (cutoff_epoch == 0) { removed++; continue; }  /* 전체 삭제 */
+        if (line.size() < 20 || line[0] != '[') { keep.push_back(line); continue; }
+        std::string ts = line.substr(1, 19);
+        struct tm tm = {};
+        strptime(ts.c_str(), "%Y-%m-%d %H:%M:%S", &tm);
+        std::time_t epoch = mktime(&tm);
+        if (epoch < cutoff_epoch) { removed++; }
+        else { keep.push_back(line); }
+    }
+    in.close();
+
+    std::ofstream out(log_path, std::ios::trunc);
+    if (!out.is_open()) return -1;
+    for (auto& l : keep) out << l << '\n';
+    return removed;
+}
+
+/* AGENT_LOG_DIR 안의 모든 .log 파일 경로를 수집 */
+static std::vector<std::string> collect_agent_log_paths() {
+    std::vector<std::string> paths;
+    DIR *d = opendir(AGENT_LOG_DIR.c_str());
+    if (!d) return paths;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != nullptr) {
+        std::string name(ent->d_name);
+        if (name.size() > 4 && name.substr(name.size() - 4) == ".log")
+            paths.push_back(AGENT_LOG_DIR + "/" + name);
+    }
+    closedir(d);
+    return paths;
+}
+
+static void cmd_delete_log(const std::string& target) {
+    if (target.empty()) {
+        ui_enqueue("Usage: delete-log <ip|tag|all>", CP_SYSTEM, true);
+        return;
+    }
+
+    /* 대상 로그 파일 목록 결정 */
+    std::vector<std::string> log_paths;
+    std::string display_target;
+
+    if (target == "all") {
+        log_paths = collect_agent_log_paths();
+        display_target = "ALL agents (" + std::to_string(log_paths.size()) + " files)";
+    } else {
+        std::string ip = resolve_ip(target);
+        std::string safe_ip = ip;
+        std::replace(safe_ip.begin(), safe_ip.end(), ':', '_');
+        std::string path = AGENT_LOG_DIR + "/" + safe_ip + ".log";
+        log_paths.push_back(path);
+        display_target = display_name(ip);
+    }
+
+    if (log_paths.empty()) {
+        ui_enqueue("No log files found.", CP_SYSTEM, true);
+        return;
+    }
+
+    /* 기간 선택 UI */
+    struct Period { const char *label; long seconds; };
+    static const Period periods[] = {
+        { "1h  — last 1 hour",    3600LL },
+        { "6h  — last 6 hours",   3600LL * 6 },
+        { "24h — last 24 hours",  3600LL * 24 },
+        { "7d  — last 7 days",    3600LL * 24 * 7 },
+        { "30d — last 30 days",   3600LL * 24 * 30 },
+        { "all — delete everything", 0 },
+    };
+    static const int NPERIODS = (int)(sizeof(periods) / sizeof(periods[0]));
+
+    curs_set(0);
+    int cursor = 0;
+    int chosen = -1;
+
+    while (chosen < 0) {
+        clear();
+        attron(COLOR_PAIR(CP_BORDER_ALERT) | A_BOLD);
+        mvhline(0, 0, ' ', COLS);
+        mvprintw(0, 2, " delete-log: %s", display_target.c_str());
+        attroff(COLOR_PAIR(CP_BORDER_ALERT) | A_BOLD);
+        mvprintw(2, 2, "Delete logs OLDER than:");
+        mvprintw(3, 2, "UP/DOWN: move  ENTER: select  q: cancel");
+        for (int i = 0; i < NPERIODS; i++) {
+            if (i == cursor) attron(A_REVERSE);
+            mvprintw(5 + i, 4, "%-36s", periods[i].label);
+            if (i == cursor) attroff(A_REVERSE);
+        }
+        refresh();
+
+        int ch = getch();
+        if (ch == 'q' || ch == 'Q' || ch == 27) { chosen = -2; break; }
+        if (ch == KEY_UP)   cursor = std::max(0, cursor - 1);
+        if (ch == KEY_DOWN) cursor = std::min(NPERIODS - 1, cursor + 1);
+        if (ch == '\n' || ch == KEY_ENTER) chosen = cursor;
+    }
+
+    if (chosen < 0) {
+        restore_ui();
+        keypad(g_cmd_win, TRUE);
+        wtimeout(g_cmd_win, 100);
+        ui_enqueue("delete-log cancelled.", CP_SYSTEM, false);
+        return;
+    }
+
+    /* 확인 프롬프트 */
+    std::time_t cutoff = (periods[chosen].seconds > 0)
+                         ? (std::time(nullptr) - periods[chosen].seconds)
+                         : 0;
+
+    clear();
+    attron(COLOR_PAIR(CP_BORDER_ALERT) | A_BOLD);
+    mvhline(0, 0, ' ', COLS);
+    mvprintw(0, 2, " delete-log: confirm");
+    attroff(COLOR_PAIR(CP_BORDER_ALERT) | A_BOLD);
+    mvprintw(2, 2, "Target : %s", display_target.c_str());
+    mvprintw(3, 2, "Period : %s", periods[chosen].label);
+    if (cutoff > 0) {
+        char cutbuf[32];
+        struct tm tm_c = {};
+        localtime_r(&cutoff, &tm_c);
+        strftime(cutbuf, sizeof(cutbuf), "%Y-%m-%d %H:%M:%S", &tm_c);
+        mvprintw(4, 2, "Delete entries before: %s", cutbuf);
+    } else {
+        mvprintw(4, 2, "Delete ALL entries in file(s)");
+    }
+    mvprintw(6, 2, "Type 'yes' to confirm, anything else to cancel:");
+    refresh();
+
+    curs_set(1);
+    std::string confirm = read_string_at(7, 2, 10);
+    curs_set(0);
+
+    restore_ui();
+    keypad(g_cmd_win, TRUE);
+    wtimeout(g_cmd_win, 100);
+
+    if (confirm != "yes") {
+        ui_enqueue("delete-log cancelled.", CP_SYSTEM, false);
+        return;
+    }
+
+    /* 실제 삭제 수행 */
+    int total_removed = 0;
+    int failed = 0;
+    for (auto& path : log_paths) {
+        std::lock_guard<std::mutex> lk(log_file_mutex);
+        int n = delete_log_file(path, cutoff);
+        if (n < 0) failed++;
+        else total_removed += n;
+    }
+
+    char result[128];
+    snprintf(result, sizeof(result),
+             "delete-log done: %d lines removed from %d file(s)%s",
+             total_removed, (int)log_paths.size(),
+             failed > 0 ? " (some files failed)" : "");
+    ui_enqueue(result, CP_SYSTEM, true);
+}
+
+// ─────────────────────────────────────────────────────────────────────
 //  명령어 셸 (UI 스레드 — 모든 ncurses 호출은 여기서만)
 // ─────────────────────────────────────────────────────────────────────
 
@@ -1361,6 +1537,96 @@ void command_shell() {
     int  input_pos = 0;
     keypad(g_cmd_win, TRUE);
     wtimeout(g_cmd_win, 100);
+
+    /* 히스토리 */
+    std::vector<std::string> history;
+    int hist_idx = 0;   /* history.size() == "현재 입력 중" */
+
+    /* 탭 완성 후보 목록 */
+    static const std::vector<std::string> ALL_CMDS = {
+        "list", "tag", "untag", "tags", "tm",
+        "stats", "trace-log", "trace-tr", "replay",
+        "delete-log", "help", "exit", "quit"
+    };
+    static const std::set<std::string> ARG_CMDS = {
+        "tag", "untag", "stats", "trace-log", "trace-tr", "replay", "delete-log"
+    };
+
+    /* 탭 완성 헬퍼 */
+    auto do_tab = [&]() {
+        std::string cur(input_buf);
+        auto sp = cur.find(' ');
+
+        if (sp == std::string::npos) {
+            /* 커맨드 이름 완성 */
+            std::vector<std::string> matches;
+            for (auto& c : ALL_CMDS)
+                if (c.size() >= cur.size() && c.substr(0, cur.size()) == cur)
+                    matches.push_back(c);
+            if (matches.empty()) return;
+            if (matches.size() == 1) {
+                std::string done = matches[0] + " ";
+                strncpy(input_buf, done.c_str(), sizeof(input_buf) - 1);
+                input_pos = (int)done.size();
+            } else {
+                /* 최장 공통 접두사 */
+                std::string pfx = matches[0];
+                for (auto& m : matches) {
+                    size_t i = 0;
+                    while (i < pfx.size() && i < m.size() && pfx[i] == m[i]) i++;
+                    pfx = pfx.substr(0, i);
+                }
+                strncpy(input_buf, pfx.c_str(), sizeof(input_buf) - 1);
+                input_pos = (int)pfx.size();
+                std::string hint;
+                for (auto& m : matches) hint += m + "  ";
+                ui_enqueue(hint, CP_SYSTEM, false);
+            }
+        } else {
+            /* 인수 완성 (IP 또는 태그) */
+            std::string cmd        = cur.substr(0, sp);
+            std::string arg_prefix = cur.substr(sp + 1);
+            if (ARG_CMDS.find(cmd) == ARG_CMDS.end()) return;
+
+            std::vector<std::string> cands;
+            {
+                std::lock_guard<std::mutex> lk(clients_mutex);
+                for (auto& a : connected_agents)
+                    cands.push_back(display_name(a));
+            }
+            {
+                std::lock_guard<std::mutex> lk(tag_mutex);
+                for (auto& kv : g_tag_to_ip) cands.push_back(kv.first);
+            }
+            if (cmd == "delete-log") cands.push_back("all");
+
+            std::vector<std::string> matches;
+            for (auto& c : cands)
+                if (c.size() >= arg_prefix.size() &&
+                    c.substr(0, arg_prefix.size()) == arg_prefix)
+                    matches.push_back(c);
+            if (matches.empty()) return;
+
+            if (matches.size() == 1) {
+                std::string done = cmd + " " + matches[0];
+                strncpy(input_buf, done.c_str(), sizeof(input_buf) - 1);
+                input_pos = (int)done.size();
+            } else {
+                std::string pfx = matches[0];
+                for (auto& m : matches) {
+                    size_t i = 0;
+                    while (i < pfx.size() && i < m.size() && pfx[i] == m[i]) i++;
+                    pfx = pfx.substr(0, i);
+                }
+                std::string done = cmd + " " + pfx;
+                strncpy(input_buf, done.c_str(), sizeof(input_buf) - 1);
+                input_pos = (int)done.size();
+                std::string hint;
+                for (auto& m : matches) hint += m + "  ";
+                ui_enqueue(hint, CP_SYSTEM, false);
+            }
+        }
+    };
 
     while (true) {
         ui_flush();
@@ -1377,6 +1643,11 @@ void command_shell() {
             memset(input_buf, 0, sizeof(input_buf));
             input_pos = 0;
             if (cmd_line.empty()) continue;
+
+            /* 히스토리에 추가 (연속 중복 제외) */
+            if (history.empty() || history.back() != cmd_line)
+                history.push_back(cmd_line);
+            hist_idx = (int)history.size();
 
             std::stringstream ss(cmd_line);
             std::string cmd, arg1, arg2;
@@ -1442,6 +1713,9 @@ void command_shell() {
             } else if (cmd == "replay") {
                 cmd_replay(arg1);
 
+            } else if (cmd == "delete-log") {
+                cmd_delete_log(arg1);
+
             } else if (cmd == "help") {
                 ui_enqueue("  list                 : 에이전트 목록 + 위험도 + 마지막 수신", CP_SYSTEM, false);
                 ui_enqueue("  tag [<ip> <name>]    : 태그 지정 (인수 없으면 선택 UI)",       CP_SYSTEM, false);
@@ -1452,10 +1726,31 @@ void command_shell() {
                 ui_enqueue("  trace-log <ip|tag>   : 에이전트 전체 로그 조회",               CP_SYSTEM, false);
                 ui_enqueue("  trace-tr  <H:H>      : 시간대 ALERT 조회 (e.g. 1:13)",        CP_SYSTEM, false);
                 ui_enqueue("  replay <ip|tag>      : 행동 타임라인 재구성 (EXEC + FILE)",    CP_SYSTEM, false);
+                ui_enqueue("  delete-log <ip|tag|all> : 기간 선택 후 에이전트 로그 삭제",   CP_SYSTEM, false);
                 ui_enqueue("  exit                 : 서버 종료",                             CP_SYSTEM, false);
 
             } else {
                 ui_enqueue("Unknown command. Type 'help'.", CP_BORDER_ALERT, false);
+            }
+
+        } else if (ch == '\t') {
+            do_tab();
+
+        } else if (ch == KEY_UP) {
+            if (!history.empty() && hist_idx > 0) {
+                hist_idx--;
+                strncpy(input_buf, history[hist_idx].c_str(), sizeof(input_buf) - 1);
+                input_pos = (int)strlen(input_buf);
+            }
+        } else if (ch == KEY_DOWN) {
+            if (hist_idx < (int)history.size() - 1) {
+                hist_idx++;
+                strncpy(input_buf, history[hist_idx].c_str(), sizeof(input_buf) - 1);
+                input_pos = (int)strlen(input_buf);
+            } else {
+                hist_idx = (int)history.size();
+                memset(input_buf, 0, sizeof(input_buf));
+                input_pos = 0;
             }
 
         } else if (ch == KEY_BACKSPACE || ch == 127 || ch == '\b') {
