@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <set>
 #include <ncurses.h>
+#include <clocale>
 #include "../utils/ssl_utils.h"
 
 #define PORT          9000
@@ -120,6 +121,7 @@ static void rebuild_main_windows() {
 }
 
 static void init_ui() {
+    setlocale(LC_ALL, "");
     initscr();
     start_color();
     use_default_colors();
@@ -382,7 +384,7 @@ static std::vector<std::string> select_agents_tui() {
     while (true) {
         clear();
         attron(COLOR_PAIR(CP_TITLE_NORMAL) | A_BOLD);
-        mvprintw(0, 2, "Trace Monitor — Select agents (max 4)");
+        mvprintw(0, 2, "Trace Monitor - Select agents (max 4)");
         attroff(COLOR_PAIR(CP_TITLE_NORMAL) | A_BOLD);
         mvprintw(1, 2, "UP/DOWN: move  SPACE: toggle  a: all  ENTER: confirm  q: cancel");
 
