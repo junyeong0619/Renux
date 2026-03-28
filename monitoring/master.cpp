@@ -1,10 +1,11 @@
 /**
- * Renux Master Server - V2.4
- * - Split TUI: 상단 로그 창 + 하단 명령 입력 (단일 스레드 ncurses)
- * - 에이전트 태깅: tag/untag/tags, tags.conf 영구 저장
- * - tm: Trace Monitor 대시보드 (per-agent 패널, ALERT 하이라이트)
- * - trace-log <ip|tag>: 오버레이 창에서 에이전트 로그 조회
- * - trace-tr  <H:H>   : 시간대 ALERT 필터 (e.g. trace-tr 1:13)
+ * Renux Master Server - V2.5
+ * 신규:
+ *   - Geolocation: REVERSE_SHELL 탐지 시 원격 IP 위치 자동 조회
+ *   - Risk Score : 이벤트 가중치 누적 (0-100, LOW/MEDIUM/HIGH/CRITICAL)
+ *   - Alert Burst: 30초 내 3회 이상 ALERT → CRITICAL 격상
+ *   - stats [ip]  : 에이전트별 이벤트 통계 + ASCII 바 차트
+ *   - Heartbeat  : list에 마지막 수신 시간 표시
  */
 
 #include <fstream>
@@ -31,6 +32,8 @@
 #define PORT           9000
 #define BUFFER_SIZE    4096
 #define MAX_LOG_LINES  200
+#define BURST_WINDOW   30    /* 초 */
+#define BURST_THRESH   3     /* BURST_WINDOW 안에 몇 번 이상이면 CRITICAL */
 
 #define MASTER_CERT "/etc/renux/master.crt"
 #define MASTER_KEY  "/etc/renux/master.key"
@@ -43,14 +46,30 @@
 #define CP_STATUSBAR      6
 #define CP_SELECTED       7
 #define CP_SYSTEM         8
+#define CP_CRITICAL       9   /* 밝은 빨강 */
+#define CP_RISK_HIGH     10
+#define CP_RISK_MED      11
+#define CP_RISK_LOW      12
 
 // ─────────────────────────────────────────────────────────────────────
 //  에이전트 데이터
 // ─────────────────────────────────────────────────────────────────────
 
 struct AgentData {
-    std::deque<std::string> logs;
-    bool alert = false;
+    std::deque<std::string>  logs;
+    bool                     alert    = false;
+    bool                     critical = false;   /* burst 감지 */
+    int                      risk     = 0;       /* 0-100 */
+    std::time_t              last_seen = 0;
+
+    /* 이벤트 카운터 */
+    int cnt_exec    = 0;
+    int cnt_file    = 0;
+    int cnt_reverse = 0;
+    int cnt_webshell= 0;
+
+    /* 버스트 감지용 ALERT 타임스탬프 */
+    std::deque<std::time_t> alert_ts;
 };
 
 std::mutex agent_data_mutex;
@@ -68,14 +87,13 @@ std::map<std::string, AgentData> agent_data;
 // ─────────────────────────────────────────────────────────────────────
 
 std::mutex tag_mutex;
-std::map<std::string, std::string> g_tag_to_ip;   /* name → ip  */
-std::map<std::string, std::string> g_ip_to_tag;   /* ip   → name */
+std::map<std::string, std::string> g_tag_to_ip;
+std::map<std::string, std::string> g_ip_to_tag;
 
 void save_tags() {
     std::lock_guard<std::mutex> lk(tag_mutex);
     std::ofstream f(TAG_FILE);
-    for (auto& [name, ip] : g_tag_to_ip)
-        f << name << "=" << ip << "\n";
+    for (auto& [name, ip] : g_tag_to_ip) f << name << "=" << ip << "\n";
 }
 
 void load_tags() {
@@ -93,14 +111,12 @@ void load_tags() {
     }
 }
 
-/* 태그 또는 IP 문자열을 IP로 변환 */
 std::string resolve_ip(const std::string& s) {
     std::lock_guard<std::mutex> lk(tag_mutex);
     auto it = g_tag_to_ip.find(s);
     return (it != g_tag_to_ip.end()) ? it->second : s;
 }
 
-/* IP를 "tag | ip" 또는 "ip" 형태로 표시 */
 std::string display_name(const std::string& ip) {
     std::lock_guard<std::mutex> lk(tag_mutex);
     auto it = g_ip_to_tag.find(ip);
@@ -108,20 +124,98 @@ std::string display_name(const std::string& ip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-//  UI 메시지 큐 (백그라운드 스레드 → UI 스레드)
-//  ncurses는 command_shell 스레드에서만 호출한다.
+//  유틸리티
 // ─────────────────────────────────────────────────────────────────────
 
-struct LogEntry {
-    std::string text;
-    int  color_pair;
-    bool bold;
-};
+static std::string time_ago(std::time_t t) {
+    if (t == 0) return "never";
+    int d = (int)(std::time(nullptr) - t);
+    if (d < 60)   return std::to_string(d) + "s ago";
+    if (d < 3600) return std::to_string(d / 60) + "m ago";
+    return std::to_string(d / 3600) + "h ago";
+}
+
+static const char* risk_label(int r) {
+    if (r >= 80) return "CRITICAL";
+    if (r >= 50) return "HIGH";
+    if (r >= 20) return "MEDIUM";
+    return "LOW";
+}
+
+static int risk_color(int r) {
+    if (r >= 80) return CP_CRITICAL;
+    if (r >= 50) return CP_RISK_HIGH;
+    if (r >= 20) return CP_RISK_MED;
+    return CP_RISK_LOW;
+}
+
+static bool is_private_ip(const std::string& ip) {
+    struct in_addr addr;
+    if (inet_pton(AF_INET, ip.c_str(), &addr) != 1) return true;
+    uint32_t h = ntohl(addr.s_addr);
+    return (h >> 24 == 10) ||
+           (h >> 24 == 127) ||
+           ((h >> 16) == 0xC0A8) ||
+           ((h >> 20) == 0xAC1);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Geolocation (ip-api.com, 비동기)
+// ─────────────────────────────────────────────────────────────────────
+
+std::mutex geo_mutex;
+std::map<std::string, std::string> geo_cache;
+
+static std::string geolocate(const std::string& ip) {
+    if (is_private_ip(ip)) return "";
+    {
+        std::lock_guard<std::mutex> lk(geo_mutex);
+        auto it = geo_cache.find(ip);
+        if (it != geo_cache.end()) return it->second;
+    }
+
+    /* curl 인수에 ip 직접 삽입 전 inet_pton으로 검증 완료 */
+    std::string cmd = "curl -s --max-time 4 'http://ip-api.com/json/" +
+                      ip + "?fields=status,country,city' 2>/dev/null";
+    FILE *pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return "";
+
+    char buf[512] = {};
+    fread(buf, 1, sizeof(buf) - 1, pipe);
+    pclose(pipe);
+
+    std::string raw(buf);
+    auto extract = [&](const std::string& key) -> std::string {
+        std::string needle = "\"" + key + "\":\"";
+        auto pos = raw.find(needle);
+        if (pos == std::string::npos) return "";
+        pos += needle.size();
+        auto end = raw.find('"', pos);
+        return end != std::string::npos ? raw.substr(pos, end - pos) : "";
+    };
+
+    std::string loc;
+    if (extract("status") == "success") {
+        std::string country = extract("country");
+        std::string city    = extract("city");
+        if (!country.empty())
+            loc = city.empty() ? country : (city + ", " + country);
+    }
+
+    std::lock_guard<std::mutex> lk(geo_mutex);
+    geo_cache[ip] = loc;
+    return loc;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  UI 메시지 큐 (모든 스레드 → UI 스레드)
+// ─────────────────────────────────────────────────────────────────────
+
+struct LogEntry { std::string text; int color_pair; bool bold; };
 
 std::queue<LogEntry> g_ui_queue;
 std::mutex           g_ui_queue_mtx;
 
-/* 어느 스레드에서나 호출 가능 (ncurses 호출 없음) */
 static void ui_enqueue(const std::string& text, int cp = 0, bool bold = false) {
     std::lock_guard<std::mutex> lk(g_ui_queue_mtx);
     g_ui_queue.push({text, cp, bold});
@@ -136,14 +230,18 @@ static WINDOW *g_cmd_win  = nullptr;
 static bool    g_ui_ready = false;
 
 static void init_color_pairs() {
-    init_pair(CP_BORDER_NORMAL, COLOR_WHITE,  -1);
-    init_pair(CP_BORDER_ALERT,  COLOR_RED,    -1);
-    init_pair(CP_TITLE_NORMAL,  COLOR_CYAN,   -1);
-    init_pair(CP_TITLE_ALERT,   COLOR_RED,    -1);
-    init_pair(CP_LINE_ALERT,    COLOR_YELLOW, -1);
-    init_pair(CP_STATUSBAR,     COLOR_BLACK,  COLOR_WHITE);
-    init_pair(CP_SELECTED,      COLOR_GREEN,  -1);
-    init_pair(CP_SYSTEM,        COLOR_CYAN,   -1);
+    init_pair(CP_BORDER_NORMAL, COLOR_WHITE,   -1);
+    init_pair(CP_BORDER_ALERT,  COLOR_RED,     -1);
+    init_pair(CP_TITLE_NORMAL,  COLOR_CYAN,    -1);
+    init_pair(CP_TITLE_ALERT,   COLOR_RED,     -1);
+    init_pair(CP_LINE_ALERT,    COLOR_YELLOW,  -1);
+    init_pair(CP_STATUSBAR,     COLOR_BLACK,   COLOR_WHITE);
+    init_pair(CP_SELECTED,      COLOR_GREEN,   -1);
+    init_pair(CP_SYSTEM,        COLOR_CYAN,    -1);
+    init_pair(CP_CRITICAL,      COLOR_RED,     -1);
+    init_pair(CP_RISK_HIGH,     COLOR_YELLOW,  -1);
+    init_pair(CP_RISK_MED,      COLOR_CYAN,    -1);
+    init_pair(CP_RISK_LOW,      COLOR_WHITE,   -1);
 }
 
 static void draw_main_chrome() {
@@ -204,7 +302,6 @@ static void restore_ui() {
     wrefresh(g_cmd_win);
 }
 
-/* UI 큐 드레인 (UI 스레드 전용) */
 static void ui_flush() {
     if (!g_ui_ready || !g_log_win) return;
     std::lock_guard<std::mutex> lk(g_ui_queue_mtx);
@@ -221,7 +318,7 @@ static void ui_flush() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-//  오버레이 창 (스크롤 가능, q로 닫기)
+//  오버레이 창
 // ─────────────────────────────────────────────────────────────────────
 
 static void show_overlay(const std::string& title, const std::vector<std::string>& lines) {
@@ -237,40 +334,37 @@ static void show_overlay(const std::string& title, const std::vector<std::string
 
     while (true) {
         werase(win);
-
-        /* 헤더 */
         wattron(win, COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
         mvwhline(win, 0, 0, ' ', cols);
         mvwprintw(win, 0, 1, " %s", title.c_str());
         wattroff(win, COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
 
-        /* 내용 */
         for (int i = 0; i < view_h - 1 && scroll + i < total; i++) {
             const std::string& line = lines[scroll + i];
             bool is_alert = (line.find("ALERT:") != std::string::npos);
-            if (is_alert) wattron(win, COLOR_PAIR(CP_LINE_ALERT) | A_BOLD);
+            bool is_geo   = (line.find("[GEO]") != std::string::npos);
+            if (is_alert)     wattron(win, COLOR_PAIR(CP_LINE_ALERT) | A_BOLD);
+            else if (is_geo)  wattron(win, COLOR_PAIR(CP_CRITICAL) | A_BOLD);
             int cw = cols - 2;
             std::string disp = line.size() > (size_t)cw ? line.substr(0, cw) : line;
             mvwprintw(win, i + 1, 1, "%-*s", cw, disp.c_str());
-            if (is_alert) wattroff(win, COLOR_PAIR(CP_LINE_ALERT) | A_BOLD);
+            if (is_alert || is_geo) wattroff(win, COLOR_PAIR(CP_LINE_ALERT) | COLOR_PAIR(CP_CRITICAL) | A_BOLD);
         }
 
-        /* 푸터 */
         wattron(win, COLOR_PAIR(CP_STATUSBAR));
         mvwhline(win, rows - 1, 0, ' ', cols);
         mvwprintw(win, rows - 1, 1,
-                  " %d/%d lines  UP/DOWN: scroll  PgUp/PgDn | Ctrl+B/F: page  q: close",
+                  " %d/%d  UP/DOWN: scroll  Ctrl+B/F | PgUp/PgDn: page  Home/End  q: close",
                   std::min(scroll + view_h - 1, total), total);
         wattroff(win, COLOR_PAIR(CP_STATUSBAR));
 
         wrefresh(win);
-
         int ch = wgetch(win);
         if (ch == 'q' || ch == 'Q') break;
         if (ch == KEY_UP   && scroll > 0) scroll--;
         if (ch == KEY_DOWN && scroll + view_h - 1 < total) scroll++;
-        if (ch == KEY_PPAGE || ch == 2)  scroll = std::max(0, scroll - (view_h - 1));           /* PgUp / Ctrl+B */
-        if (ch == KEY_NPAGE || ch == 6)  scroll = std::min(std::max(0, total - view_h + 1), scroll + view_h - 1); /* PgDn / Ctrl+F */
+        if (ch == KEY_PPAGE || ch == 2)  scroll = std::max(0, scroll - (view_h - 1));
+        if (ch == KEY_NPAGE || ch == 6)  scroll = std::min(std::max(0, total - view_h + 1), scroll + view_h - 1);
         if (ch == KEY_HOME) scroll = 0;
         if (ch == KEY_END)  scroll = std::max(0, total - view_h + 1);
         if (ch == KEY_RESIZE) {
@@ -279,7 +373,6 @@ static void show_overlay(const std::string& title, const std::vector<std::string
             view_h = rows - 2;
         }
     }
-
     delwin(win);
     restore_ui();
     keypad(g_cmd_win, TRUE);
@@ -287,8 +380,19 @@ static void show_overlay(const std::string& title, const std::vector<std::string
 }
 
 // ─────────────────────────────────────────────────────────────────────
-//  로그 기록
+//  로그 기록 + 위험도/버스트 업데이트
 // ─────────────────────────────────────────────────────────────────────
+
+/* REVERSE_SHELL 메시지에서 remote IP 추출: "remote=1.2.3.4:4444" */
+static std::string extract_remote_ip(const std::string& msg) {
+    auto pos = msg.find("remote=");
+    if (pos == std::string::npos) return "";
+    pos += 7;
+    auto colon = msg.find(':', pos);
+    auto space  = msg.find(' ',  pos);
+    auto end    = std::min(colon, space);
+    return (end != std::string::npos) ? msg.substr(pos, end - pos) : msg.substr(pos);
+}
 
 void log_message(const std::string& ip, const std::string& msg) {
     /* 파일 저장 */
@@ -303,22 +407,77 @@ void log_message(const std::string& ip, const std::string& msg) {
         }
     }
 
-    /* per-agent 인메모리 버퍼 */
+    /* per-agent 업데이트 */
+    bool is_alert    = (msg.find("ALERT:")        != std::string::npos);
+    bool is_reverse  = (msg.find("REVERSE_SHELL") != std::string::npos);
+    bool is_webshell = (msg.find("WEBSHELL")      != std::string::npos);
+    bool is_file     = (msg.find("FILE ACCESS")   != std::string::npos);
+    bool burst_triggered = false;
+
     {
         std::lock_guard<std::mutex> lk(agent_data_mutex);
         auto& d = agent_data[ip];
         d.logs.push_back(msg);
         if (d.logs.size() > MAX_LOG_LINES) d.logs.pop_front();
-        if (msg.find("ALERT:") != std::string::npos) d.alert = true;
+        d.last_seen = std::time(nullptr);
+
+        /* 위험도 가중치 */
+        if (is_reverse)       { d.risk = std::min(100, d.risk + 30); d.cnt_reverse++;  }
+        else if (is_webshell) { d.risk = std::min(100, d.risk + 25); d.cnt_webshell++; }
+        else if (is_file)     { d.risk = std::min(100, d.risk +  2); d.cnt_file++;     }
+        else if (msg.find("EXEC") != std::string::npos)
+                              { d.risk = std::min(100, d.risk +  1); d.cnt_exec++;     }
+
+        /* ALERT 버스트 감지 */
+        if (is_alert) {
+            d.alert = true;
+            std::time_t now = std::time(nullptr);
+            d.alert_ts.push_back(now);
+            while (!d.alert_ts.empty() && now - d.alert_ts.front() > BURST_WINDOW)
+                d.alert_ts.pop_front();
+            if ((int)d.alert_ts.size() >= BURST_THRESH && !d.critical) {
+                d.critical = true;
+                burst_triggered = true;
+            }
+        }
     }
 
-    /* UI 큐 */
-    bool is_alert = (msg.find("ALERT:") != std::string::npos);
+    /* UI 출력 */
     std::string line = "[" + display_name(ip) + "] " + msg;
     if (is_alert)
         ui_enqueue(line, CP_LINE_ALERT, true);
     else
         ui_enqueue(line);
+
+    if (burst_triggered)
+        ui_enqueue("!! ALERT BURST: " + display_name(ip) + " — " +
+                   std::to_string(BURST_THRESH) + " alerts in " +
+                   std::to_string(BURST_WINDOW) + "s !!",
+                   CP_CRITICAL, true);
+
+    /* Geolocation: REVERSE_SHELL인 경우 비동기 조회 */
+    if (is_reverse) {
+        std::string remote_ip = extract_remote_ip(msg);
+        if (!remote_ip.empty()) {
+            std::thread([ip, remote_ip]() {
+                std::string loc = geolocate(remote_ip);
+                if (loc.empty()) return;
+                std::string geo_msg = "[GEO] " + remote_ip + " -> " + loc;
+                ui_enqueue(geo_msg, CP_CRITICAL, true);
+                {
+                    std::lock_guard<std::mutex> lk(log_file_mutex);
+                    std::ofstream f(MASTER_LOG_FILE, std::ios::app);
+                    if (f.is_open()) {
+                        std::time_t now = std::time(nullptr);
+                        char tbuf[32];
+                        std::strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S",
+                                      std::localtime(&now));
+                        f << "[" << tbuf << "] [Agent: " << ip << "] " << geo_msg << "\n";
+                    }
+                }
+            }).detach();
+        }
+    }
 }
 
 void update_agent_status(const std::string& ip, bool connected) {
@@ -329,171 +488,15 @@ void update_agent_status(const std::string& ip, bool connected) {
     }
     {
         std::lock_guard<std::mutex> lk(agent_data_mutex);
-        if (connected) agent_data[ip];
+        if (connected) {
+            auto& d = agent_data[ip];
+            d.last_seen = std::time(nullptr);
+        }
     }
     std::string msg = connected
-        ? "[SYSTEM] Agent connected: " + display_name(ip)
+        ? "[SYSTEM] Agent connected: "    + display_name(ip)
         : "[SYSTEM] Agent disconnected: " + display_name(ip);
     ui_enqueue(msg, CP_SYSTEM, true);
-}
-
-// ─────────────────────────────────────────────────────────────────────
-//  인터랙티브 태그 UI (UI 스레드 전용)
-// ─────────────────────────────────────────────────────────────────────
-
-/* 화면의 특정 위치에서 문자열을 한 글자씩 입력받는다 (ESC로 취소) */
-static std::string read_string_at(int y, int x, int maxlen) {
-    char buf[256] = {};
-    int  pos = 0;
-    curs_set(1);
-    timeout(-1);
-
-    while (true) {
-        mvprintw(y, x, "> %-*s", maxlen, buf);
-        move(y, x + 2 + pos);
-        refresh();
-
-        int ch = getch();
-        if (ch == '\n' || ch == KEY_ENTER) break;
-        if (ch == 27)  { buf[0] = '\0'; break; }   /* ESC: 취소 */
-        if ((ch == KEY_BACKSPACE || ch == 127) && pos > 0) buf[--pos] = '\0';
-        else if (ch >= 32 && ch < 127 && pos < maxlen - 1) buf[pos++] = (char)ch;
-    }
-    curs_set(0);
-    return std::string(buf);
-}
-
-static void cmd_tag_interactive() {
-    std::vector<std::string> agents;
-    {
-        std::lock_guard<std::mutex> lk(clients_mutex);
-        agents.assign(connected_agents.begin(), connected_agents.end());
-    }
-    if (agents.empty()) {
-        ui_enqueue("No connected agents.", CP_SYSTEM, true);
-        return;
-    }
-
-    curs_set(0);
-    int cursor = 0;
-    std::string selected_ip;
-
-    /* ── 에이전트 선택 ── */
-    while (true) {
-        clear();
-        attron(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
-        mvhline(0, 0, ' ', COLS);
-        mvprintw(0, 2, " Tag Agent - Select agent to tag");
-        attroff(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
-        mvprintw(1, 2, "UP/DOWN: move  ENTER: select  q: cancel");
-
-        for (int i = 0; i < (int)agents.size(); i++) {
-            std::string cur_tag;
-            {
-                std::lock_guard<std::mutex> lk(tag_mutex);
-                auto it = g_ip_to_tag.find(agents[i]);
-                if (it != g_ip_to_tag.end()) cur_tag = "  [" + it->second + "]";
-            }
-            if (i == cursor) attron(A_REVERSE);
-            attron(COLOR_PAIR(CP_TITLE_NORMAL));
-            mvprintw(i + 3, 4, "%-18s", agents[i].c_str());
-            attroff(COLOR_PAIR(CP_TITLE_NORMAL));
-            printw("%s", cur_tag.c_str());
-            if (i == cursor) attroff(A_REVERSE);
-        }
-        refresh();
-
-        int ch = getch();
-        if (ch == 'q' || ch == 'Q') goto done;
-        if (ch == KEY_UP)   cursor = std::max(0, cursor - 1);
-        if (ch == KEY_DOWN) cursor = std::min((int)agents.size() - 1, cursor + 1);
-        if (ch == '\n' || ch == KEY_ENTER) { selected_ip = agents[cursor]; break; }
-    }
-
-    /* ── 이름 입력 ── */
-    {
-        clear();
-        attron(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
-        mvhline(0, 0, ' ', COLS);
-        mvprintw(0, 2, " Tag Agent - Enter name for %s", selected_ip.c_str());
-        attroff(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
-        mvprintw(2, 4, "Tag name (ESC to cancel):");
-        refresh();
-
-        std::string name = read_string_at(3, 4, 32);
-        if (!name.empty()) {
-            {
-                std::lock_guard<std::mutex> lk(tag_mutex);
-                auto old = g_ip_to_tag.find(selected_ip);
-                if (old != g_ip_to_tag.end()) g_tag_to_ip.erase(old->second);
-                g_tag_to_ip[name]       = selected_ip;
-                g_ip_to_tag[selected_ip] = name;
-            }
-            save_tags();
-            ui_enqueue("Tagged: " + selected_ip + " -> " + name, CP_SYSTEM, true);
-        }
-    }
-
-done:
-    restore_ui();
-    keypad(g_cmd_win, TRUE);
-    wtimeout(g_cmd_win, 100);
-}
-
-static void cmd_untag_interactive() {
-    std::vector<std::pair<std::string, std::string>> tagged;   /* name, ip */
-    {
-        std::lock_guard<std::mutex> lk(tag_mutex);
-        for (auto& [name, ip] : g_tag_to_ip)
-            tagged.push_back({name, ip});
-    }
-    if (tagged.empty()) {
-        ui_enqueue("No tags defined.", CP_SYSTEM, true);
-        return;
-    }
-
-    curs_set(0);
-    int cursor = 0;
-
-    while (true) {
-        clear();
-        attron(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
-        mvhline(0, 0, ' ', COLS);
-        mvprintw(0, 2, " Untag Agent - Select tag to remove");
-        attroff(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
-        mvprintw(1, 2, "UP/DOWN: move  ENTER: remove  q: cancel");
-
-        for (int i = 0; i < (int)tagged.size(); i++) {
-            if (i == cursor) attron(A_REVERSE);
-            attron(COLOR_PAIR(CP_SELECTED));
-            mvprintw(i + 3, 4, "%-15s", tagged[i].first.c_str());
-            attroff(COLOR_PAIR(CP_SELECTED));
-            printw(" -> %s", tagged[i].second.c_str());
-            if (i == cursor) attroff(A_REVERSE);
-        }
-        refresh();
-
-        int ch = getch();
-        if (ch == 'q' || ch == 'Q') break;
-        if (ch == KEY_UP)   cursor = std::max(0, cursor - 1);
-        if (ch == KEY_DOWN) cursor = std::min((int)tagged.size() - 1, cursor + 1);
-        if (ch == '\n' || ch == KEY_ENTER) {
-            std::string name = tagged[cursor].first;
-            std::string ip   = tagged[cursor].second;
-            {
-                std::lock_guard<std::mutex> lk(tag_mutex);
-                g_ip_to_tag.erase(ip);
-                g_tag_to_ip.erase(name);
-            }
-            save_tags();
-            ui_enqueue("Removed tag: " + name + " (" + ip + ")", CP_SYSTEM, true);
-            break;
-        }
-    }
-
-    restore_ui();
-    keypad(g_cmd_win, TRUE);
-    wtimeout(g_cmd_win, 100);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -503,71 +506,102 @@ static void cmd_untag_interactive() {
 struct PanelLayout { int y, x, h, w; };
 
 static std::vector<PanelLayout> calc_layout(int n, int rows, int cols) {
-    int usable = rows - 1;
+    int u = rows - 1;
     std::vector<PanelLayout> L;
     if (n == 1) {
-        L.push_back({0, 0, usable, cols});
+        L.push_back({0, 0, u, cols});
     } else if (n == 2) {
         int hw = cols / 2;
-        L.push_back({0, 0,  usable, hw});
-        L.push_back({0, hw, usable, cols - hw});
+        L.push_back({0, 0,  u, hw});
+        L.push_back({0, hw, u, cols - hw});
     } else if (n == 3) {
-        int hh = usable / 2, hw = cols / 2;
-        L.push_back({0,  0,  hh,          hw});
-        L.push_back({0,  hw, hh,          cols - hw});
-        L.push_back({hh, 0,  usable - hh, cols});
+        int hh = u / 2, hw = cols / 2;
+        L.push_back({0,  0,  hh,     hw});
+        L.push_back({0,  hw, hh,     cols - hw});
+        L.push_back({hh, 0,  u - hh, cols});
     } else {
-        int hh = usable / 2, hw = cols / 2;
-        L.push_back({0,  0,  hh,          hw});
-        L.push_back({0,  hw, hh,          cols - hw});
-        L.push_back({hh, 0,  usable - hh, hw});
-        L.push_back({hh, hw, usable - hh, cols - hw});
+        int hh = u / 2, hw = cols / 2;
+        L.push_back({0,  0,  hh,     hw});
+        L.push_back({0,  hw, hh,     cols - hw});
+        L.push_back({hh, 0,  u - hh, hw});
+        L.push_back({hh, hw, u - hh, cols - hw});
     }
     return L;
 }
 
-static void draw_panel(WINDOW *win, const std::string& ip,
-                       const std::deque<std::string>& logs, bool alert) {
+static void draw_panel(WINDOW *win, const std::string& ip, const AgentData& d) {
     int h, w;
     getmaxyx(win, h, w);
     werase(win);
 
-    wattron(win, COLOR_PAIR(alert ? CP_BORDER_ALERT : CP_BORDER_NORMAL) | (alert ? A_BOLD : 0));
+    bool crit = d.critical;
+    bool alrt = d.alert;
+
+    /* 테두리 */
+    int border_cp = crit ? CP_CRITICAL : (alrt ? CP_BORDER_ALERT : CP_BORDER_NORMAL);
+    wattron(win, COLOR_PAIR(border_cp) | ((crit || alrt) ? A_BOLD : 0));
     box(win, 0, 0);
-    wattroff(win, COLOR_PAIR(CP_BORDER_ALERT) | COLOR_PAIR(CP_BORDER_NORMAL) | A_BOLD);
+    wattroff(win, COLOR_PAIR(border_cp) | A_BOLD);
 
+    /* 타이틀 */
     std::string dname = display_name(ip);
-    std::string title = alert ? (" !! " + dname + " !! ") : (" " + dname + " ");
+    std::string title = crit ? (" !! " + dname + " !! ")
+                       : alrt ? (" ! " + dname + " ! ")
+                               : (" " + dname + " ");
     int tx = std::max(1, (w - (int)title.size()) / 2);
-    wattron(win, COLOR_PAIR(alert ? CP_TITLE_ALERT : CP_TITLE_NORMAL) | A_BOLD);
+    int title_cp = crit ? CP_CRITICAL : (alrt ? CP_TITLE_ALERT : CP_TITLE_NORMAL);
+    wattron(win, COLOR_PAIR(title_cp) | A_BOLD);
     mvwprintw(win, 0, tx, "%s", title.c_str());
-    wattroff(win, COLOR_PAIR(CP_TITLE_ALERT) | COLOR_PAIR(CP_TITLE_NORMAL) | A_BOLD);
+    wattroff(win, COLOR_PAIR(title_cp) | A_BOLD);
 
-    int ch = h - 2, cw = w - 2;
-    int start = (int)logs.size() > ch ? (int)logs.size() - ch : 0;
-    for (int i = 0; i < ch && start + i < (int)logs.size(); i++) {
-        std::string line = logs[start + i];
+    /* 위험도 표시 (2행) */
+    if (h > 4) {
+        char rbuf[32];
+        snprintf(rbuf, sizeof(rbuf), " RISK:%d [%s] ", d.risk, risk_label(d.risk));
+        int rx = std::max(1, (w - (int)strlen(rbuf)) / 2);
+        wattron(win, COLOR_PAIR(risk_color(d.risk)) | A_BOLD);
+        mvwprintw(win, 1, rx, "%s", rbuf);
+        wattroff(win, COLOR_PAIR(risk_color(d.risk)) | A_BOLD);
+    }
+
+    /* 로그 라인 (2행 이후부터) */
+    int log_start_row = (h > 4) ? 2 : 1;
+    int ch = h - log_start_row - 1;
+    int cw = w - 2;
+    int start = (int)d.logs.size() > ch ? (int)d.logs.size() - ch : 0;
+
+    for (int i = 0; i < ch && start + i < (int)d.logs.size(); i++) {
+        std::string line = d.logs[start + i];
         if ((int)line.size() > cw) line = line.substr(0, cw);
-        bool is_alert = (line.find("ALERT:") != std::string::npos);
-        if (is_alert) wattron(win, COLOR_PAIR(CP_LINE_ALERT) | A_BOLD);
-        mvwprintw(win, i + 1, 1, "%-*s", cw, line.c_str());
-        if (is_alert) wattroff(win, COLOR_PAIR(CP_LINE_ALERT) | A_BOLD);
+        bool la = (line.find("ALERT:") != std::string::npos);
+        if (la) wattron(win, COLOR_PAIR(CP_LINE_ALERT) | A_BOLD);
+        mvwprintw(win, log_start_row + i, 1, "%-*s", cw, line.c_str());
+        if (la) wattroff(win, COLOR_PAIR(CP_LINE_ALERT) | A_BOLD);
     }
     wrefresh(win);
 }
 
-static void draw_statusbar_tm(int rows, int cols, int n_agents, int n_alerts) {
+static void draw_statusbar_tm(int rows, int cols,
+                              int n_agents, int n_alerts, int n_critical) {
     char tbuf[32];
     time_t now = time(nullptr);
     strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", localtime(&now));
-    std::string left  = std::string(" ") + tbuf + "  Agents: " + std::to_string(n_agents);
-    std::string right = "Alerts: " + std::to_string(n_alerts) + "  [c]lear  [q]uit ";
+
+    std::string left = std::string(" ") + tbuf +
+                       "  Agents:" + std::to_string(n_agents) +
+                       "  Alerts:" + std::to_string(n_alerts);
+    if (n_critical > 0)
+        left += "  !! CRITICAL:" + std::to_string(n_critical) + " !!";
+
+    std::string right = "[c]lear  [q]uit ";
     int pad = cols - (int)left.size() - (int)right.size();
     std::string bar = left + std::string(std::max(0, pad), ' ') + right;
     if ((int)bar.size() > cols) bar = bar.substr(0, cols);
-    attron(COLOR_PAIR(CP_STATUSBAR) | A_REVERSE);
+
+    int cp = (n_critical > 0) ? CP_CRITICAL : CP_STATUSBAR;
+    attron(COLOR_PAIR(cp) | A_REVERSE | A_BOLD);
     mvprintw(rows - 1, 0, "%s", bar.c_str());
-    attroff(COLOR_PAIR(CP_STATUSBAR) | A_REVERSE);
+    attroff(COLOR_PAIR(cp) | A_REVERSE | A_BOLD);
     refresh();
 }
 
@@ -592,8 +626,13 @@ static void run_dashboard(const std::vector<std::string>& ips) {
         if (ch == 'q' || ch == 'Q') break;
         if (ch == 'c' || ch == 'C') {
             std::lock_guard<std::mutex> lk(agent_data_mutex);
-            for (auto& ip : ips)
-                if (agent_data.count(ip)) agent_data[ip].alert = false;
+            for (auto& ip : ips) {
+                if (agent_data.count(ip)) {
+                    agent_data[ip].alert    = false;
+                    agent_data[ip].critical = false;
+                    agent_data[ip].alert_ts.clear();
+                }
+            }
         }
         if (ch == KEY_RESIZE) {
             getmaxyx(stdscr, rows, cols);
@@ -606,21 +645,19 @@ static void run_dashboard(const std::vector<std::string>& ips) {
             }
             clear(); refresh();
         }
-        int n_alerts = 0;
+
+        int n_alerts = 0, n_critical = 0;
         for (int i = 0; i < n; i++) {
-            std::deque<std::string> logs_copy;
-            bool alert = false;
+            AgentData snap;
             {
                 std::lock_guard<std::mutex> lk(agent_data_mutex);
-                if (agent_data.count(ips[i])) {
-                    logs_copy = agent_data[ips[i]].logs;
-                    alert     = agent_data[ips[i]].alert;
-                }
+                if (agent_data.count(ips[i])) snap = agent_data[ips[i]];
             }
-            if (alert) n_alerts++;
-            draw_panel(wins[i], ips[i], logs_copy, alert);
+            if (snap.alert)    n_alerts++;
+            if (snap.critical) n_critical++;
+            draw_panel(wins[i], ips[i], snap);
         }
-        draw_statusbar_tm(rows, cols, n, n_alerts);
+        draw_statusbar_tm(rows, cols, n, n_alerts, n_critical);
     }
 
     for (auto w : wins) delwin(w);
@@ -646,7 +683,6 @@ static std::vector<std::string> select_agents_tui() {
     init_color_pairs();
     curs_set(0);
     noecho();
-
     std::vector<bool> checked(all.size(), false);
     int cursor = 0;
 
@@ -658,14 +694,20 @@ static std::vector<std::string> select_agents_tui() {
         mvprintw(1, 2, "UP/DOWN: move  SPACE: toggle  a: all  ENTER: confirm  q: cancel");
 
         for (int i = 0; i < (int)all.size(); i++) {
-            if (i == cursor) attron(A_REVERSE);
-            if (checked[i]) {
-                attron(COLOR_PAIR(CP_SELECTED));
-                mvprintw(i + 3, 4, "[x] %s", display_name(all[i]).c_str());
-                attroff(COLOR_PAIR(CP_SELECTED));
-            } else {
-                mvprintw(i + 3, 4, "[ ] %s", display_name(all[i]).c_str());
+            AgentData snap;
+            {
+                std::lock_guard<std::mutex> lk(agent_data_mutex);
+                if (agent_data.count(all[i])) snap = agent_data[all[i]];
             }
+            if (i == cursor) attron(A_REVERSE);
+            if (checked[i]) attron(COLOR_PAIR(CP_SELECTED));
+            mvprintw(i + 3, 4, "[%c] %-25s  RISK:%3d [%s]  %s",
+                     checked[i] ? 'x' : ' ',
+                     display_name(all[i]).c_str(),
+                     snap.risk,
+                     risk_label(snap.risk),
+                     time_ago(snap.last_seen).c_str());
+            if (checked[i]) attroff(COLOR_PAIR(CP_SELECTED));
             if (i == cursor) attroff(A_REVERSE);
         }
         refresh();
@@ -675,8 +717,7 @@ static std::vector<std::string> select_agents_tui() {
         case KEY_UP:   cursor = std::max(0, cursor - 1); break;
         case KEY_DOWN: cursor = std::min((int)all.size() - 1, cursor + 1); break;
         case ' ':      checked[cursor] = !checked[cursor]; break;
-        case 'a': case 'A':
-            std::fill(checked.begin(), checked.end(), true); break;
+        case 'a': case 'A': std::fill(checked.begin(), checked.end(), true); break;
         case '\n': case KEY_ENTER: {
             std::vector<std::string> sel;
             for (int i = 0; i < (int)all.size(); i++)
@@ -690,41 +731,170 @@ static std::vector<std::string> select_agents_tui() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+//  인터랙티브 태그 UI
+// ─────────────────────────────────────────────────────────────────────
+
+static std::string read_string_at(int y, int x, int maxlen) {
+    char buf[256] = {};
+    int  pos = 0;
+    curs_set(1);
+    timeout(-1);
+    while (true) {
+        mvprintw(y, x, "> %-*s", maxlen, buf);
+        move(y, x + 2 + pos);
+        refresh();
+        int ch = getch();
+        if (ch == '\n' || ch == KEY_ENTER) break;
+        if (ch == 27) { buf[0] = '\0'; break; }
+        if ((ch == KEY_BACKSPACE || ch == 127) && pos > 0) buf[--pos] = '\0';
+        else if (ch >= 32 && ch < 127 && pos < maxlen - 1) buf[pos++] = (char)ch;
+    }
+    curs_set(0);
+    return std::string(buf);
+}
+
+static void cmd_tag_interactive() {
+    std::vector<std::string> agents;
+    {
+        std::lock_guard<std::mutex> lk(clients_mutex);
+        agents.assign(connected_agents.begin(), connected_agents.end());
+    }
+    if (agents.empty()) { ui_enqueue("No connected agents.", CP_SYSTEM, true); return; }
+
+    curs_set(0);
+    int cursor = 0;
+    std::string selected_ip;
+
+    while (true) {
+        clear();
+        attron(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
+        mvhline(0, 0, ' ', COLS);
+        mvprintw(0, 2, " Tag Agent - Select agent");
+        attroff(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
+        mvprintw(1, 2, "UP/DOWN: move  ENTER: select  q: cancel");
+
+        for (int i = 0; i < (int)agents.size(); i++) {
+            std::string cur_tag;
+            {
+                std::lock_guard<std::mutex> lk(tag_mutex);
+                auto it = g_ip_to_tag.find(agents[i]);
+                if (it != g_ip_to_tag.end()) cur_tag = "  [" + it->second + "]";
+            }
+            if (i == cursor) attron(A_REVERSE);
+            attron(COLOR_PAIR(CP_TITLE_NORMAL));
+            mvprintw(i + 3, 4, "%-18s", agents[i].c_str());
+            attroff(COLOR_PAIR(CP_TITLE_NORMAL));
+            printw("%s", cur_tag.c_str());
+            if (i == cursor) attroff(A_REVERSE);
+        }
+        refresh();
+
+        int ch = getch();
+        if (ch == 'q' || ch == 'Q') goto tag_done;
+        if (ch == KEY_UP)   cursor = std::max(0, cursor - 1);
+        if (ch == KEY_DOWN) cursor = std::min((int)agents.size() - 1, cursor + 1);
+        if (ch == '\n' || ch == KEY_ENTER) { selected_ip = agents[cursor]; break; }
+    }
+    {
+        clear();
+        attron(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
+        mvhline(0, 0, ' ', COLS);
+        mvprintw(0, 2, " Tag Agent - Enter name for %s", selected_ip.c_str());
+        attroff(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
+        mvprintw(2, 4, "Tag name (ESC to cancel):");
+        refresh();
+        std::string name = read_string_at(3, 4, 32);
+        if (!name.empty()) {
+            {
+                std::lock_guard<std::mutex> lk(tag_mutex);
+                auto old = g_ip_to_tag.find(selected_ip);
+                if (old != g_ip_to_tag.end()) g_tag_to_ip.erase(old->second);
+                g_tag_to_ip[name]        = selected_ip;
+                g_ip_to_tag[selected_ip] = name;
+            }
+            save_tags();
+            ui_enqueue("Tagged: " + selected_ip + " -> " + name, CP_SYSTEM, true);
+        }
+    }
+tag_done:
+    restore_ui();
+    keypad(g_cmd_win, TRUE);
+    wtimeout(g_cmd_win, 100);
+}
+
+static void cmd_untag_interactive() {
+    std::vector<std::pair<std::string, std::string>> tagged;
+    {
+        std::lock_guard<std::mutex> lk(tag_mutex);
+        for (auto& [name, ip] : g_tag_to_ip) tagged.push_back({name, ip});
+    }
+    if (tagged.empty()) { ui_enqueue("No tags defined.", CP_SYSTEM, true); return; }
+
+    curs_set(0);
+    int cursor = 0;
+    while (true) {
+        clear();
+        attron(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
+        mvhline(0, 0, ' ', COLS);
+        mvprintw(0, 2, " Untag Agent - Select tag to remove");
+        attroff(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
+        mvprintw(1, 2, "UP/DOWN: move  ENTER: remove  q: cancel");
+        for (int i = 0; i < (int)tagged.size(); i++) {
+            if (i == cursor) attron(A_REVERSE);
+            attron(COLOR_PAIR(CP_SELECTED));
+            mvprintw(i + 3, 4, "%-15s", tagged[i].first.c_str());
+            attroff(COLOR_PAIR(CP_SELECTED));
+            printw(" -> %s", tagged[i].second.c_str());
+            if (i == cursor) attroff(A_REVERSE);
+        }
+        refresh();
+        int ch = getch();
+        if (ch == 'q' || ch == 'Q') break;
+        if (ch == KEY_UP)   cursor = std::max(0, cursor - 1);
+        if (ch == KEY_DOWN) cursor = std::min((int)tagged.size() - 1, cursor + 1);
+        if (ch == '\n' || ch == KEY_ENTER) {
+            std::string name = tagged[cursor].first;
+            std::string ip   = tagged[cursor].second;
+            {
+                std::lock_guard<std::mutex> lk(tag_mutex);
+                g_ip_to_tag.erase(ip);
+                g_tag_to_ip.erase(name);
+            }
+            save_tags();
+            ui_enqueue("Removed tag: " + name + " (" + ip + ")", CP_SYSTEM, true);
+            break;
+        }
+    }
+    restore_ui();
+    keypad(g_cmd_win, TRUE);
+    wtimeout(g_cmd_win, 100);
+}
+
+// ─────────────────────────────────────────────────────────────────────
 //  명령어 핸들러
 // ─────────────────────────────────────────────────────────────────────
 
 static void cmd_trace_log(const std::string& target) {
     std::string ip = resolve_ip(target);
     std::ifstream f(MASTER_LOG_FILE);
-    if (!f.is_open()) {
-        ui_enqueue("[ERROR] Cannot open " + MASTER_LOG_FILE, CP_BORDER_ALERT, true);
-        return;
-    }
+    if (!f.is_open()) { ui_enqueue("Cannot open " + MASTER_LOG_FILE, CP_BORDER_ALERT, true); return; }
     std::string needle = "[Agent: " + ip + "]";
     std::vector<std::string> results;
     std::string line;
     while (std::getline(f, line))
         if (line.find(needle) != std::string::npos) results.push_back(line);
-
     show_overlay("trace-log: " + target + " (" + ip + ")  [" +
                  std::to_string(results.size()) + " entries]", results);
 }
 
 static void cmd_trace_tr(const std::string& range) {
-    int start_h = -1, end_h = -1;
-    if (sscanf(range.c_str(), "%d:%d", &start_h, &end_h) != 2 ||
-        start_h < 0 || start_h > 23 || end_h < 0 || end_h > 23) {
-        ui_enqueue("Usage: trace-tr <start>:<end>  (e.g. trace-tr 1:13)", CP_SYSTEM, true);
-        return;
+    int sh = -1, eh = -1;
+    if (sscanf(range.c_str(), "%d:%d", &sh, &eh) != 2 ||
+        sh < 0 || sh > 23 || eh < 0 || eh > 23) {
+        ui_enqueue("Usage: trace-tr <H:H>  e.g. trace-tr 1:13", CP_SYSTEM, true); return;
     }
-
     std::ifstream f(MASTER_LOG_FILE);
-    if (!f.is_open()) {
-        ui_enqueue("[ERROR] Cannot open " + MASTER_LOG_FILE, CP_BORDER_ALERT, true);
-        return;
-    }
-
-    /* 로그 형식: [YYYY-MM-DD HH:MM:SS] [Agent: ip] msg */
+    if (!f.is_open()) { ui_enqueue("Cannot open " + MASTER_LOG_FILE, CP_BORDER_ALERT, true); return; }
     std::vector<std::string> results;
     std::string line;
     while (std::getline(f, line)) {
@@ -733,27 +903,70 @@ static void cmd_trace_tr(const std::string& range) {
         int hour = -1;
         sscanf(line.c_str() + 12, "%d", &hour);
         if (hour < 0) continue;
-
-        bool in_range = (start_h <= end_h)
-            ? (hour >= start_h && hour <= end_h)
-            : (hour >= start_h || hour <= end_h);  /* 자정 걸치는 경우 */
-        if (in_range) results.push_back(line);
+        bool in = (sh <= eh) ? (hour >= sh && hour <= eh)
+                              : (hour >= sh || hour <= eh);
+        if (in) results.push_back(line);
     }
-
     char title[128];
-    snprintf(title, sizeof(title),
-             "trace-tr %02d:00 ~ %02d:00  [%d ALERTs]",
-             start_h, end_h, (int)results.size());
+    snprintf(title, sizeof(title), "trace-tr %02d:00~%02d:00  [%d ALERTs]",
+             sh, eh, (int)results.size());
     show_overlay(title, results);
 }
 
-static void cmd_tag(const std::string& ip, const std::string& name) {
-    if (ip.empty() || name.empty()) {
-        ui_enqueue("Usage: tag <ip> <name>", CP_SYSTEM, true); return;
+static void cmd_stats(const std::string& target) {
+    std::vector<std::string> ips;
+    if (target.empty()) {
+        std::lock_guard<std::mutex> lk(clients_mutex);
+        ips.assign(connected_agents.begin(), connected_agents.end());
+    } else {
+        ips.push_back(resolve_ip(target));
     }
+
+    std::vector<std::string> lines;
+    const int BAR_W = 28;
+
+    auto make_bar = [&](const char* label, int cnt, int max_cnt) {
+        int filled = (max_cnt > 0) ? cnt * BAR_W / max_cnt : 0;
+        std::string bar(filled, '#');
+        bar += std::string(BAR_W - filled, '-');
+        char buf[128];
+        snprintf(buf, sizeof(buf), "  %-12s |%s| %d", label, bar.c_str(), cnt);
+        return std::string(buf);
+    };
+
+    for (auto& ip : ips) {
+        AgentData snap;
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lk(agent_data_mutex);
+            auto it = agent_data.find(ip);
+            if (it != agent_data.end()) { snap = it->second; found = true; }
+        }
+        if (!found) { lines.push_back("Agent not found: " + ip); continue; }
+
+        lines.push_back("Agent    : " + display_name(ip));
+        lines.push_back("Last seen: " + time_ago(snap.last_seen));
+        lines.push_back("Risk     : " + std::to_string(snap.risk) +
+                         " [" + risk_label(snap.risk) + "]" +
+                         (snap.critical ? "  !! BURST DETECTED !!" : ""));
+        lines.push_back("");
+
+        int mx = std::max({snap.cnt_exec, snap.cnt_file,
+                           snap.cnt_reverse, snap.cnt_webshell, 1});
+        lines.push_back(make_bar("EXEC",        snap.cnt_exec,     mx));
+        lines.push_back(make_bar("FILE ACCESS", snap.cnt_file,     mx));
+        lines.push_back(make_bar("REV SHELL",   snap.cnt_reverse,  mx));
+        lines.push_back(make_bar("WEBSHELL",    snap.cnt_webshell, mx));
+        lines.push_back("");
+    }
+
+    show_overlay("stats" + (target.empty() ? " (all)" : ": " + target), lines);
+}
+
+static void cmd_tag(const std::string& ip, const std::string& name) {
+    if (ip.empty() || name.empty()) { ui_enqueue("Usage: tag <ip> <name>", CP_SYSTEM, true); return; }
     {
         std::lock_guard<std::mutex> lk(tag_mutex);
-        /* 기존 태그 제거 */
         auto old = g_ip_to_tag.find(ip);
         if (old != g_ip_to_tag.end()) g_tag_to_ip.erase(old->second);
         g_tag_to_ip[name] = ip;
@@ -764,15 +977,11 @@ static void cmd_tag(const std::string& ip, const std::string& name) {
 }
 
 static void cmd_untag(const std::string& name) {
-    if (name.empty()) {
-        ui_enqueue("Usage: untag <name>", CP_SYSTEM, true); return;
-    }
+    if (name.empty()) { ui_enqueue("Usage: untag <name>", CP_SYSTEM, true); return; }
     {
         std::lock_guard<std::mutex> lk(tag_mutex);
         auto it = g_tag_to_ip.find(name);
-        if (it == g_tag_to_ip.end()) {
-            ui_enqueue("Tag not found: " + name, CP_BORDER_ALERT, true); return;
-        }
+        if (it == g_tag_to_ip.end()) { ui_enqueue("Tag not found: " + name, CP_BORDER_ALERT, true); return; }
         g_ip_to_tag.erase(it->second);
         g_tag_to_ip.erase(it);
     }
@@ -782,10 +991,7 @@ static void cmd_untag(const std::string& name) {
 
 static void cmd_tags() {
     std::lock_guard<std::mutex> lk(tag_mutex);
-    if (g_tag_to_ip.empty()) {
-        ui_enqueue("No tags defined. Use: tag <ip> <name>", CP_SYSTEM, false);
-        return;
-    }
+    if (g_tag_to_ip.empty()) { ui_enqueue("No tags. Use: tag <ip> <name>", CP_SYSTEM, false); return; }
     ui_enqueue("--- Tags ---", CP_TITLE_NORMAL, true);
     for (auto& [name, ip] : g_tag_to_ip)
         ui_enqueue("  " + name + " -> " + ip);
@@ -799,15 +1005,11 @@ static void cmd_tags() {
 void command_shell() {
     char input_buf[512] = {};
     int  input_pos = 0;
-
     keypad(g_cmd_win, TRUE);
     wtimeout(g_cmd_win, 100);
 
     while (true) {
-        /* 큐 드레인 */
         ui_flush();
-
-        /* 프롬프트 갱신 */
         mvwprintw(g_cmd_win, 0, 0, "> %-*s", COLS - 3, input_buf);
         wmove(g_cmd_win, 0, 2 + input_pos);
         wnoutrefresh(g_cmd_win);
@@ -830,13 +1032,28 @@ void command_shell() {
                 endwin(); exit(0);
 
             } else if (cmd == "list") {
-                std::lock_guard<std::mutex> lk(clients_mutex);
-                ui_enqueue("--- Connected Agents (" +
-                           std::to_string(connected_agents.size()) + ") ---",
+                std::vector<std::string> agents;
+                {
+                    std::lock_guard<std::mutex> lk(clients_mutex);
+                    agents.assign(connected_agents.begin(), connected_agents.end());
+                }
+                ui_enqueue("--- Connected Agents (" + std::to_string(agents.size()) + ") ---",
                            CP_TITLE_NORMAL, true);
-                for (auto& a : connected_agents)
-                    ui_enqueue("  " + display_name(a));
-                ui_enqueue("------------------------------");
+                for (auto& a : agents) {
+                    AgentData snap;
+                    {
+                        std::lock_guard<std::mutex> lk(agent_data_mutex);
+                        if (agent_data.count(a)) snap = agent_data[a];
+                    }
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "  %-30s  RISK:%3d [%-8s]  %s",
+                             display_name(a).c_str(),
+                             snap.risk, risk_label(snap.risk),
+                             time_ago(snap.last_seen).c_str());
+                    int cp = risk_color(snap.risk);
+                    ui_enqueue(buf, cp, snap.risk >= 50);
+                }
+                ui_enqueue("---------------------------------------------");
 
             } else if (cmd == "tag") {
                 if (arg1.empty()) cmd_tag_interactive();
@@ -851,36 +1068,33 @@ void command_shell() {
 
             } else if (cmd == "tm") {
                 clear(); refresh();
-                auto selected = select_agents_tui();
-                if (!selected.empty()) {
-                    clear(); refresh();
-                    run_dashboard(selected);
-                }
+                auto sel = select_agents_tui();
+                if (!sel.empty()) { clear(); refresh(); run_dashboard(sel); }
                 restore_ui();
                 keypad(g_cmd_win, TRUE);
                 wtimeout(g_cmd_win, 100);
 
             } else if (cmd == "trace-log") {
-                if (arg1.empty())
-                    ui_enqueue("Usage: trace-log <ip|tag>", CP_SYSTEM, true);
-                else
-                    cmd_trace_log(arg1);
+                if (arg1.empty()) ui_enqueue("Usage: trace-log <ip|tag>", CP_SYSTEM, true);
+                else cmd_trace_log(arg1);
 
             } else if (cmd == "trace-tr") {
-                if (arg1.empty())
-                    ui_enqueue("Usage: trace-tr <start>:<end>  e.g. trace-tr 1:13", CP_SYSTEM, true);
-                else
-                    cmd_trace_tr(arg1);
+                if (arg1.empty()) ui_enqueue("Usage: trace-tr <H:H>  e.g. 1:13", CP_SYSTEM, true);
+                else cmd_trace_tr(arg1);
+
+            } else if (cmd == "stats") {
+                cmd_stats(arg1);
 
             } else if (cmd == "help") {
-                ui_enqueue("  list                 : 연결된 에이전트 목록", CP_SYSTEM, false);
-                ui_enqueue("  tag [<ip> <name>]    : 태그 지정 (인수 없으면 선택 UI)", CP_SYSTEM, false);
-                ui_enqueue("  untag [<name>]       : 태그 제거 (인수 없으면 선택 UI)", CP_SYSTEM, false);
-                ui_enqueue("  tags                 : 태그 목록", CP_SYSTEM, false);
-                ui_enqueue("  tm                   : Trace Monitor 대시보드", CP_SYSTEM, false);
-                ui_enqueue("  trace-log <ip|tag>   : 에이전트 전체 로그 조회", CP_SYSTEM, false);
-                ui_enqueue("  trace-tr  <H:H>      : 시간대 ALERT 조회 (e.g. 1:13)", CP_SYSTEM, false);
-                ui_enqueue("  exit                 : 서버 종료", CP_SYSTEM, false);
+                ui_enqueue("  list                 : 에이전트 목록 + 위험도 + 마지막 수신", CP_SYSTEM, false);
+                ui_enqueue("  tag [<ip> <name>]    : 태그 지정 (인수 없으면 선택 UI)",       CP_SYSTEM, false);
+                ui_enqueue("  untag [<name>]       : 태그 제거 (인수 없으면 선택 UI)",       CP_SYSTEM, false);
+                ui_enqueue("  tags                 : 태그 목록",                             CP_SYSTEM, false);
+                ui_enqueue("  tm                   : Trace Monitor 대시보드",                CP_SYSTEM, false);
+                ui_enqueue("  stats [ip|tag]       : 이벤트 통계 + ASCII 바 차트",           CP_SYSTEM, false);
+                ui_enqueue("  trace-log <ip|tag>   : 에이전트 전체 로그 조회",               CP_SYSTEM, false);
+                ui_enqueue("  trace-tr  <H:H>      : 시간대 ALERT 조회 (e.g. 1:13)",        CP_SYSTEM, false);
+                ui_enqueue("  exit                 : 서버 종료",                             CP_SYSTEM, false);
 
             } else {
                 ui_enqueue("Unknown command. Type 'help'.", CP_BORDER_ALERT, false);
@@ -904,14 +1118,12 @@ void handle_client(int client_socket, struct sockaddr_in client_addr, SSL_CTX *s
 
     SSL *ssl = SSL_new(ssl_ctx);
     SSL_set_fd(ssl, client_socket);
-    if (SSL_accept(ssl) <= 0) {
-        SSL_free(ssl); close(client_socket); return;
-    }
+    if (SSL_accept(ssl) <= 0) { SSL_free(ssl); close(client_socket); return; }
 
     std::string ip(sock_ip);
     bool registered = false;
-
     char buffer[BUFFER_SIZE];
+
     while (true) {
         memset(buffer, 0, BUFFER_SIZE);
         int n = SSL_read(ssl, buffer, BUFFER_SIZE - 1);
@@ -948,14 +1160,12 @@ int main() {
     SSL_CTX *ssl_ctx = create_server_ssl_ctx(MASTER_CERT, MASTER_KEY);
     if (!ssl_ctx) {
         fprintf(stderr, "TLS init failed. Check %s & %s\n", MASTER_CERT, MASTER_KEY);
-        fprintf(stderr, "Hint: Run install.sh (master) to generate certificates.\n");
         return 1;
     }
 
     int server_fd;
     struct sockaddr_in address;
     int opt = 1;
-
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) { perror("socket"); return 1; }
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     address.sin_family      = AF_INET;
@@ -968,7 +1178,6 @@ int main() {
     init_ui();
     ui_enqueue("Renux Master started on port " + std::to_string(PORT), CP_SYSTEM, true);
 
-    /* accept 루프는 메인 스레드, command_shell이 UI 스레드 */
     std::thread(command_shell).detach();
 
     while (true) {
