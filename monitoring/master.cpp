@@ -1295,30 +1295,45 @@ static void cmd_replay(const std::string& target) {
         return;
     }
 
-    /* 타임라인 구성 */
+    /* EXEC 기준으로 그룹화: 각 그룹 = EXEC 1개 + 뒤따르는 FILE 이벤트들 */
+    struct Group {
+        RawEntry              exec_e;
+        std::vector<RawEntry> files;
+    };
+    std::vector<Group> groups;
+    for (auto& e : entries) {
+        if (e.type == "EXEC") {
+            groups.push_back({e, {}});
+        } else if (!groups.empty()) {
+            groups.back().files.push_back(e);
+        }
+    }
+
+    /* 최신 이벤트가 위로 오도록 역순 */
+    std::reverse(groups.begin(), groups.end());
+
+    /* 타임라인 구성 (newest first) */
     std::vector<std::string> lines;
-    lines.push_back("=== " + display_name(ip) + " — Activity Replay ===");
+    lines.push_back("=== " + display_name(ip) + " — Activity Replay (newest first) ===");
     lines.push_back("  " + std::to_string(entries.size()) + " events  |  " +
                     entries.front().full_ts + " ~ " + entries.back().full_ts);
     lines.push_back("");
 
-    const int GAP_SEC = 30;   /* 이 이상 공백이면 구분선 */
+    const int GAP_SEC = 30;
 
-    for (int i = 0; i < (int)entries.size(); i++) {
-        auto& e = entries[i];
+    for (int i = 0; i < (int)groups.size(); i++) {
+        auto& g = groups[i];
 
-        /* 이전 이벤트와 시간 차 → gap 구분선 */
-        if (i > 0 && e.epoch - entries[i - 1].epoch >= GAP_SEC) {
-            int gap = (int)(e.epoch - entries[i - 1].epoch);
-            lines.push_back("--- " + std::to_string(gap) + "s gap ---");
+        /* 인접 그룹 간 시간 차 → gap 구분선 (역순이므로 i-1이 더 최신) */
+        if (i > 0) {
+            int gap = (int)(groups[i-1].exec_e.epoch - g.exec_e.epoch);
+            if (gap >= GAP_SEC)
+                lines.push_back("--- " + std::to_string(gap) + "s gap ---");
         }
 
-        if (e.type == "EXEC") {
-            lines.push_back("[" + e.timestamp + "] " + e.detail);
-        } else {
-            /* FILE ACCESS: EXEC 아래 들여쓰기 */
-            lines.push_back("            -> " + e.detail);
-        }
+        lines.push_back("[" + g.exec_e.timestamp + "] " + g.exec_e.detail);
+        for (auto& fe : g.files)
+            lines.push_back("    [" + fe.timestamp + "] -> " + fe.detail);
     }
 
     std::string title = "replay: " + display_name(ip);
