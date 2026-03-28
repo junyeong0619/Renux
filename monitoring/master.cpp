@@ -1314,9 +1314,21 @@ static void cmd_replay(const std::string& target) {
 
     /* 타임라인 구성 (newest first) */
     std::vector<std::string> lines;
+    /* timezone 이름 조회 */
+    std::string tz_name = "UTC";
+    {
+        time_t now = time(nullptr);
+        struct tm tm_now = {};
+        localtime_r(&now, &tm_now);
+        char tz_buf[64] = {};
+        strftime(tz_buf, sizeof(tz_buf), "%Z", &tm_now);
+        tz_name = tz_buf;
+    }
+
     lines.push_back("=== " + display_name(ip) + " — Activity Replay (newest first) ===");
     lines.push_back("  " + std::to_string(entries.size()) + " events  |  " +
-                    entries.front().full_ts + " ~ " + entries.back().full_ts);
+                    entries.front().full_ts + " ~ " + entries.back().full_ts +
+                    "  [" + tz_name + "]");
     lines.push_back("");
 
     const int GAP_SEC = 30;
