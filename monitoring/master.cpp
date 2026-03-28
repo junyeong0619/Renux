@@ -74,8 +74,11 @@ struct AgentData {
     /* 버스트 감지용 ALERT 타임스탬프 */
     std::deque<std::time_t> alert_ts;
 
-    /* 그래프용: 최근 GRAPH_WINDOW_SEC 초 내 이벤트 타임스탬프 */
-    std::deque<std::time_t> event_times;
+    /* 그래프용: 이벤트 종류별 타임스탬프 (최근 GRAPH_WINDOW_SEC 초) */
+    std::deque<std::time_t> exec_times;
+    std::deque<std::time_t> file_times;
+    std::deque<std::time_t> reverse_times;
+    std::deque<std::time_t> webshell_times;
 };
 
 std::mutex agent_data_mutex;
@@ -438,18 +441,26 @@ void log_message(const std::string& ip, const std::string& msg) {
         if (d.logs.size() > MAX_LOG_LINES) d.logs.pop_front();
         d.last_seen = std::time(nullptr);
 
-        /* 그래프용 이벤트 타임라인 업데이트 */
-        d.event_times.push_back(now);
-        while (!d.event_times.empty() &&
-               now - d.event_times.front() > GRAPH_WINDOW_SEC)
-            d.event_times.pop_front();
+        /* 그래프용 이벤트 타임라인 업데이트 (타입별 분리) */
+        auto trim_deque = [&](std::deque<std::time_t>& dq) {
+            while (!dq.empty() && now - dq.front() > GRAPH_WINDOW_SEC)
+                dq.pop_front();
+        };
 
-        /* 위험도 가중치 */
-        if (is_reverse)       { d.risk = std::min(100, d.risk + 30); d.cnt_reverse++;  }
-        else if (is_webshell) { d.risk = std::min(100, d.risk + 25); d.cnt_webshell++; }
-        else if (is_file)     { d.risk = std::min(100, d.risk +  2); d.cnt_file++;     }
-        else if (msg.find("EXEC") != std::string::npos)
-                              { d.risk = std::min(100, d.risk +  1); d.cnt_exec++;     }
+        /* 위험도 가중치 + 타입별 타임스탬프 */
+        if (is_reverse) {
+            d.risk = std::min(100, d.risk + 30); d.cnt_reverse++;
+            d.reverse_times.push_back(now); trim_deque(d.reverse_times);
+        } else if (is_webshell) {
+            d.risk = std::min(100, d.risk + 25); d.cnt_webshell++;
+            d.webshell_times.push_back(now); trim_deque(d.webshell_times);
+        } else if (is_file) {
+            d.risk = std::min(100, d.risk +  2); d.cnt_file++;
+            d.file_times.push_back(now); trim_deque(d.file_times);
+        } else if (msg.find("EXEC") != std::string::npos) {
+            d.risk = std::min(100, d.risk +  1); d.cnt_exec++;
+            d.exec_times.push_back(now); trim_deque(d.exec_times);
+        }
 
         /* ALERT 버스트 감지 */
         if (is_alert) {
@@ -531,55 +542,94 @@ struct PanelLayout { int y, x, h, w; };
 /* 그래프 모드 전역 플래그 (run_dashboard에서만 읽기/쓰기 → 별도 뮤텍스 불필요) */
 static bool g_graph_mode = false;
 
-/* 패널 내부에 실시간 이벤트 빈도 막대그래프 렌더링
- * event_times : 최근 GRAPH_WINDOW_SEC 초 내 타임스탬프 deque
- * area_h, area_w : 그릴 수 있는 내부 영역 (테두리/헤더 제외) */
+/* 이벤트 타임스탬프 deque를 버킷 배열로 변환 */
+static std::vector<int> make_buckets(const std::deque<std::time_t>& times,
+                                     int n_buckets, std::time_t now) {
+    std::vector<int> b(n_buckets, 0);
+    for (auto t : times) {
+        int age = (int)(now - t);
+        if (age < 0 || age >= GRAPH_WINDOW_SEC) continue;
+        int idx = (int)((double)(GRAPH_WINDOW_SEC - 1 - age)
+                        / GRAPH_WINDOW_SEC * n_buckets);
+        if (idx >= 0 && idx < n_buckets) b[idx]++;
+    }
+    return b;
+}
+
+/* 라벨별 스파크라인 한 행 그리기
+ * density 값에 따라 ' ' / '.' / '+' / '#' 문자 사용 */
+static void draw_sparkline_row(WINDOW *win, int row, int label_w, int bar_w,
+                               const char *label, int color_pair,
+                               const std::vector<int>& buckets) {
+    /* 라벨 */
+    wattron(win, COLOR_PAIR(color_pair) | A_BOLD);
+    mvwprintw(win, row, 1, "%-*s", label_w, label);
+    wattroff(win, COLOR_PAIR(color_pair) | A_BOLD);
+
+    int max_val = *std::max_element(buckets.begin(), buckets.end());
+
+    /* 스파크라인 바 */
+    wattron(win, COLOR_PAIR(color_pair));
+    int x = 1 + label_w;
+    for (int col = 0; col < (int)buckets.size() && col < bar_w; col++) {
+        char ch;
+        if (max_val == 0 || buckets[col] == 0) ch = ' ';
+        else {
+            double ratio = (double)buckets[col] / max_val;
+            ch = (ratio > 0.66) ? '#'
+               : (ratio > 0.33) ? '+'
+                                 : '.';
+        }
+        mvwaddch(win, row, x + col, ch);
+    }
+    wattroff(win, COLOR_PAIR(color_pair));
+}
+
+/* 패널 내부에 이벤트 종류별 스파크라인 렌더링
+ *
+ * EXEC    [##.#  +#. ##  +#  ...]
+ * FILE    [+# .## +# .##  +# ...]
+ * REVERSE [          ##        .]
+ * WEB     [     .               ]
+ *          60s ago           now
+ */
 static void draw_graph(WINDOW *win, const AgentData& d,
                        int start_row, int area_h, int area_w) {
     if (area_h <= 0 || area_w <= 0) return;
 
-    /* 버킷 수 = 패널 너비 (1열 = 1버킷 = GRAPH_WINDOW_SEC/area_w 초) */
-    int n_buckets = area_w;
-    std::vector<int> buckets(n_buckets, 0);
+    /* 구조: 라벨(8자) + 스파크라인 + 시간눈금 1줄 */
+    const int LABEL_W = 8;
+    int bar_w   = area_w - LABEL_W;
+    if (bar_w < 4) return;
+
+    /* 이벤트 4종 정의 */
+    struct Row {
+        const char *label;
+        int         color;
+        const std::deque<std::time_t>& times;
+    };
+    Row rows[] = {
+        { "EXEC",    CP_BORDER_NORMAL, d.exec_times    },
+        { "FILE",    CP_RISK_LOW,      d.file_times    },
+        { "REVERSE", CP_CRITICAL,      d.reverse_times },
+        { "WEB",     CP_RISK_HIGH,     d.webshell_times},
+    };
+    int n_rows = (int)(sizeof(rows) / sizeof(rows[0]));
 
     std::time_t now = std::time(nullptr);
-    for (auto t : d.event_times) {
-        int age = (int)(now - t);           /* 몇 초 전 */
-        if (age < 0 || age >= GRAPH_WINDOW_SEC) continue;
-        /* 오래된 이벤트 = 왼쪽, 최신 = 오른쪽 */
-        int idx = (int)((double)(GRAPH_WINDOW_SEC - 1 - age)
-                        / GRAPH_WINDOW_SEC * n_buckets);
-        if (idx >= 0 && idx < n_buckets) buckets[idx]++;
+
+    for (int r = 0; r < n_rows && r < area_h - 1; r++) {
+        auto buckets = make_buckets(rows[r].times, bar_w, now);
+        draw_sparkline_row(win, start_row + r, LABEL_W, bar_w,
+                           rows[r].label, rows[r].color, buckets);
     }
 
-    int max_val = *std::max_element(buckets.begin(), buckets.end());
-    if (max_val == 0) max_val = 1;  /* division guard */
-
-    /* 위에서 아래로 채우는 막대그래프 */
-    for (int col = 0; col < n_buckets && col < area_w; col++) {
-        int bar_h = (int)((double)buckets[col] / max_val * area_h);
-        for (int row = 0; row < area_h; row++) {
-            int scr_row = start_row + (area_h - 1 - row);
-            if (row < bar_h) {
-                /* 높이에 따라 색상 차별화 */
-                double ratio = (double)row / area_h;
-                int cp = (ratio > 0.7) ? CP_CRITICAL
-                       : (ratio > 0.4) ? CP_RISK_HIGH
-                                       : CP_RISK_LOW;
-                wattron(win, COLOR_PAIR(cp) | A_BOLD);
-                mvwaddch(win, scr_row, 1 + col, ACS_BLOCK);
-                wattroff(win, COLOR_PAIR(cp) | A_BOLD);
-            } else {
-                mvwaddch(win, scr_row, 1 + col, ' ');
-            }
-        }
-    }
-
-    /* 하단 시간 눈금: "60s ago" ... "now" */
-    if (start_row + area_h < getmaxy(win) - 1) {
+    /* 시간 눈금 */
+    int axis_row = start_row + n_rows;
+    if (axis_row < getmaxy(win) - 1 && axis_row < start_row + area_h) {
         wattron(win, A_DIM);
-        mvwprintw(win, start_row + area_h, 1, "%-*s", area_w - 8, "60s ago");
-        mvwprintw(win, start_row + area_h, 1 + area_w - 4, "now");
+        mvwprintw(win, axis_row, 1 + LABEL_W, "%-*s", bar_w - 3, "60s ago");
+        mvwprintw(win, axis_row, 1 + LABEL_W + bar_w - 3, "now");
         wattroff(win, A_DIM);
     }
 }
