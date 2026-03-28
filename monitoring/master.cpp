@@ -1165,6 +1165,135 @@ static void cmd_tags() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+//  Activity Replay
+// ─────────────────────────────────────────────────────────────────────
+
+/*
+ * 로그 파일에서 EXEC / FILE ACCESS 이벤트를 읽어
+ * 사람이 보기 편한 타임라인으로 재구성:
+ *
+ *  [14:30:01] grep arg /etc/passwd
+ *  [14:30:01]   FILE ACCESS: /etc/passwd
+ *  [14:30:05] python3 solution.py
+ *  -- 45s gap --
+ *  [14:31:20] ls -al /home
+ */
+static void cmd_replay(const std::string& target) {
+    if (target.empty()) {
+        ui_enqueue("Usage: replay <ip|tag>", CP_SYSTEM, true);
+        return;
+    }
+
+    std::string ip  = resolve_ip(target);
+    std::string safe_ip = ip;
+    std::replace(safe_ip.begin(), safe_ip.end(), ':', '_');
+    std::string log_path = AGENT_LOG_DIR + "/" + safe_ip + ".log";
+
+    std::ifstream f(log_path);
+    if (!f.is_open()) {
+        ui_enqueue("Log not found: " + log_path, CP_BORDER_ALERT, true);
+        return;
+    }
+
+    struct RawEntry {
+        std::string timestamp;   /* HH:MM:SS */
+        std::string full_ts;     /* YYYY-MM-DD HH:MM:SS */
+        std::string type;        /* "EXEC" | "FILE" */
+        std::string detail;      /* 정제된 내용 */
+        std::time_t epoch = 0;
+    };
+
+    std::vector<RawEntry> entries;
+    std::string line;
+
+    while (std::getline(f, line)) {
+        /* 포맷: [2026-03-28 14:30:01] EXEC ... */
+        if (line.size() < 22 || line[0] != '[') continue;
+        std::string full_ts  = line.substr(1, 19);   /* 2026-03-28 14:30:01 */
+        std::string hms      = line.substr(12, 8);   /* 14:30:01 */
+        std::string body     = line.substr(22);       /* 나머지 */
+
+        /* epoch 계산 */
+        struct tm tm = {};
+        strptime(full_ts.c_str(), "%Y-%m-%d %H:%M:%S", &tm);
+        std::time_t epoch = mktime(&tm);
+
+        RawEntry e;
+        e.full_ts   = full_ts;
+        e.timestamp = hms;
+        e.epoch     = epoch;
+
+        if (body.find("EXEC ") == 0) {
+            e.type = "EXEC";
+            /* comm + path + args 조합 → 읽기 좋은 형태로 */
+            std::string comm, path, args;
+            auto extract = [&](const std::string& key) -> std::string {
+                auto p = body.find(key + "=");
+                if (p == std::string::npos) return "";
+                p += key.size() + 1;
+                auto end = body.find(' ', p);
+                return (end == std::string::npos) ? body.substr(p) : body.substr(p, end - p);
+            };
+            comm = extract("comm");
+            path = extract("path");
+            args = extract("args");
+            /* path의 basename만 사용 (comm과 같은 경우 중복 제거) */
+            std::string basename = path;
+            auto slash = path.rfind('/');
+            if (slash != std::string::npos) basename = path.substr(slash + 1);
+            e.detail = (basename != comm ? basename : comm);
+            if (!args.empty()) e.detail += " " + args;
+        } else if (body.find("FILE ACCESS:") != std::string::npos) {
+            e.type   = "FILE";
+            /* "FILE ACCESS: /etc/passwd by pid=..." → "/etc/passwd" 만 */
+            auto start = body.find("FILE ACCESS:") + 13;
+            auto by    = body.find(" by ", start);
+            e.detail   = (by != std::string::npos)
+                         ? body.substr(start, by - start)
+                         : body.substr(start);
+        } else {
+            continue;
+        }
+
+        entries.push_back(e);
+    }
+
+    if (entries.empty()) {
+        ui_enqueue("No EXEC/FILE events in log: " + log_path, CP_SYSTEM, true);
+        return;
+    }
+
+    /* 타임라인 구성 */
+    std::vector<std::string> lines;
+    lines.push_back("=== " + display_name(ip) + " — Activity Replay ===");
+    lines.push_back("  " + std::to_string(entries.size()) + " events  |  " +
+                    entries.front().full_ts + " ~ " + entries.back().full_ts);
+    lines.push_back("");
+
+    const int GAP_SEC = 30;   /* 이 이상 공백이면 구분선 */
+
+    for (int i = 0; i < (int)entries.size(); i++) {
+        auto& e = entries[i];
+
+        /* 이전 이벤트와 시간 차 → gap 구분선 */
+        if (i > 0 && e.epoch - entries[i - 1].epoch >= GAP_SEC) {
+            int gap = (int)(e.epoch - entries[i - 1].epoch);
+            lines.push_back("--- " + std::to_string(gap) + "s gap ---");
+        }
+
+        if (e.type == "EXEC") {
+            lines.push_back("[" + e.timestamp + "] " + e.detail);
+        } else {
+            /* FILE ACCESS: EXEC 아래 들여쓰기 */
+            lines.push_back("            -> " + e.detail);
+        }
+    }
+
+    std::string title = "replay: " + display_name(ip);
+    show_overlay(title, lines);
+}
+
+// ─────────────────────────────────────────────────────────────────────
 //  명령어 셸 (UI 스레드 — 모든 ncurses 호출은 여기서만)
 // ─────────────────────────────────────────────────────────────────────
 
@@ -1251,6 +1380,9 @@ void command_shell() {
             } else if (cmd == "stats") {
                 cmd_stats(arg1);
 
+            } else if (cmd == "replay") {
+                cmd_replay(arg1);
+
             } else if (cmd == "help") {
                 ui_enqueue("  list                 : 에이전트 목록 + 위험도 + 마지막 수신", CP_SYSTEM, false);
                 ui_enqueue("  tag [<ip> <name>]    : 태그 지정 (인수 없으면 선택 UI)",       CP_SYSTEM, false);
@@ -1260,6 +1392,7 @@ void command_shell() {
                 ui_enqueue("  stats [ip|tag]       : 이벤트 통계 + ASCII 바 차트",           CP_SYSTEM, false);
                 ui_enqueue("  trace-log <ip|tag>   : 에이전트 전체 로그 조회",               CP_SYSTEM, false);
                 ui_enqueue("  trace-tr  <H:H>      : 시간대 ALERT 조회 (e.g. 1:13)",        CP_SYSTEM, false);
+                ui_enqueue("  replay <ip|tag>      : 행동 타임라인 재구성 (EXEC + FILE)",    CP_SYSTEM, false);
                 ui_enqueue("  exit                 : 서버 종료",                             CP_SYSTEM, false);
 
             } else {

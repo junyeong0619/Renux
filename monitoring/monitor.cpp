@@ -182,6 +182,8 @@ static int handle_event(void * /*ctx*/, void *data, size_t /*sz*/) {
                           " uid=" + std::to_string(e->uid) +
                           " comm=" + e->comm +
                           " path=" + e->path;
+        if (e->args[0] != '\0')
+            msg += std::string(" args=") + e->args;
         write_agent_log(msg);
         break;
     }
