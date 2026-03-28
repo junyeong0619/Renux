@@ -1,39 +1,40 @@
 /**
- * Renux Master Server - V2.3
- * - Split TUI: 상단 로그 창 + 하단 명령어 입력
+ * Renux Master Server - V2.4
+ * - Split TUI: 상단 로그 창 + 하단 명령 입력 (단일 스레드 ncurses)
+ * - 에이전트 태깅: tag/untag/tags, tags.conf 영구 저장
  * - tm: Trace Monitor 대시보드 (per-agent 패널, ALERT 하이라이트)
- * - trace-log <IP>: 저장된 로그 파일에서 특정 에이전트 로그 조회
- * - central_renux.log: 모든 이벤트 영구 저장
+ * - trace-log <ip|tag>: 오버레이 창에서 에이전트 로그 조회
+ * - trace-tr  <H:H>   : 시간대 ALERT 필터 (e.g. trace-tr 1:13)
  */
 
-#include <iostream>
 #include <fstream>
 #include <string>
 #include <sstream>
 #include <vector>
 #include <deque>
 #include <map>
+#include <queue>
 #include <thread>
 #include <mutex>
 #include <cstring>
 #include <ctime>
+#include <cstdio>
+#include <algorithm>
+#include <set>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#include <algorithm>
-#include <set>
 #include <ncurses.h>
 #include <clocale>
 #include "../utils/ssl_utils.h"
 
-#define PORT          9000
-#define BUFFER_SIZE   4096
-#define MAX_LOG_LINES 200
+#define PORT           9000
+#define BUFFER_SIZE    4096
+#define MAX_LOG_LINES  200
 
 #define MASTER_CERT "/etc/renux/master.crt"
 #define MASTER_KEY  "/etc/renux/master.key"
 
-/* ncurses 색상 쌍 */
 #define CP_BORDER_NORMAL  1
 #define CP_BORDER_ALERT   2
 #define CP_TITLE_NORMAL   3
@@ -52,23 +53,87 @@ struct AgentData {
     bool alert = false;
 };
 
-std::mutex log_mutex;
-std::mutex clients_mutex;
 std::mutex agent_data_mutex;
+std::mutex clients_mutex;
+std::mutex log_file_mutex;
+
 const std::string MASTER_LOG_FILE = "central_renux.log";
+const std::string TAG_FILE        = "renux_tags.conf";
 
 std::set<std::string>            connected_agents;
 std::map<std::string, AgentData> agent_data;
 
 // ─────────────────────────────────────────────────────────────────────
-//  Split TUI 전역
+//  태그 시스템
+// ─────────────────────────────────────────────────────────────────────
+
+std::mutex tag_mutex;
+std::map<std::string, std::string> g_tag_to_ip;   /* name → ip  */
+std::map<std::string, std::string> g_ip_to_tag;   /* ip   → name */
+
+void save_tags() {
+    std::lock_guard<std::mutex> lk(tag_mutex);
+    std::ofstream f(TAG_FILE);
+    for (auto& [name, ip] : g_tag_to_ip)
+        f << name << "=" << ip << "\n";
+}
+
+void load_tags() {
+    std::ifstream f(TAG_FILE);
+    if (!f.is_open()) return;
+    std::string line;
+    std::lock_guard<std::mutex> lk(tag_mutex);
+    while (std::getline(f, line)) {
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string name = line.substr(0, eq);
+        std::string ip   = line.substr(eq + 1);
+        g_tag_to_ip[name] = ip;
+        g_ip_to_tag[ip]   = name;
+    }
+}
+
+/* 태그 또는 IP 문자열을 IP로 변환 */
+std::string resolve_ip(const std::string& s) {
+    std::lock_guard<std::mutex> lk(tag_mutex);
+    auto it = g_tag_to_ip.find(s);
+    return (it != g_tag_to_ip.end()) ? it->second : s;
+}
+
+/* IP를 "tag | ip" 또는 "ip" 형태로 표시 */
+std::string display_name(const std::string& ip) {
+    std::lock_guard<std::mutex> lk(tag_mutex);
+    auto it = g_ip_to_tag.find(ip);
+    return (it != g_ip_to_tag.end()) ? (it->second + " | " + ip) : ip;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  UI 메시지 큐 (백그라운드 스레드 → UI 스레드)
+//  ncurses는 command_shell 스레드에서만 호출한다.
+// ─────────────────────────────────────────────────────────────────────
+
+struct LogEntry {
+    std::string text;
+    int  color_pair;
+    bool bold;
+};
+
+std::queue<LogEntry> g_ui_queue;
+std::mutex           g_ui_queue_mtx;
+
+/* 어느 스레드에서나 호출 가능 (ncurses 호출 없음) */
+static void ui_enqueue(const std::string& text, int cp = 0, bool bold = false) {
+    std::lock_guard<std::mutex> lk(g_ui_queue_mtx);
+    g_ui_queue.push({text, cp, bold});
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Split TUI
 // ─────────────────────────────────────────────────────────────────────
 
 static WINDOW *g_log_win  = nullptr;
 static WINDOW *g_cmd_win  = nullptr;
-static std::mutex g_ui_mtx;
-static bool g_ui_ready    = false;
-static bool g_tm_active   = false;   /* TM 모드 중: 로그 창 업데이트 억제 */
+static bool    g_ui_ready = false;
 
 static void init_color_pairs() {
     init_pair(CP_BORDER_NORMAL, COLOR_WHITE,  -1);
@@ -84,39 +149,29 @@ static void init_color_pairs() {
 static void draw_main_chrome() {
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
-
-    /* 헤더 */
     attron(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
     mvhline(0, 0, ' ', cols);
     char hbuf[256];
     snprintf(hbuf, sizeof(hbuf),
-             " Renux Master  Port:%d  Log:%s  type 'help'",
-             PORT, MASTER_LOG_FILE.c_str());
+             " Renux Master  Port:%d  Log:%s  'help'", PORT, MASTER_LOG_FILE.c_str());
     mvprintw(0, 0, "%.*s", cols - 1, hbuf);
     attroff(COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
-
-    /* 구분선 */
     attron(COLOR_PAIR(CP_BORDER_NORMAL));
     mvhline(rows - 2, 0, ACS_HLINE, cols);
     attroff(COLOR_PAIR(CP_BORDER_NORMAL));
-
     refresh();
 }
 
 static void rebuild_main_windows() {
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
-    /* layout: row0=header, 1..rows-3=log, rows-2=separator, rows-1=cmd */
     int log_h = rows - 3;
     if (log_h < 1) log_h = 1;
-
     if (g_log_win) { delwin(g_log_win); g_log_win = nullptr; }
     if (g_cmd_win) { delwin(g_cmd_win); g_cmd_win = nullptr; }
-
     g_log_win = newwin(log_h, cols, 1, 0);
     scrollok(g_log_win, TRUE);
     idlok(g_log_win, TRUE);
-
     g_cmd_win = newwin(1, cols, rows - 1, 0);
 }
 
@@ -129,54 +184,116 @@ static void init_ui() {
     noecho();
     keypad(stdscr, TRUE);
     curs_set(1);
-
     init_color_pairs();
     rebuild_main_windows();
     draw_main_chrome();
     wrefresh(g_log_win);
-    mvwprintw(g_cmd_win, 0, 0, "> ");
     wrefresh(g_cmd_win);
     g_ui_ready = true;
 }
 
 static void restore_ui() {
-    /* TM 모드 종료 후 split UI 복원 */
     timeout(-1);
     noecho();
     curs_set(1);
     keypad(stdscr, TRUE);
-
-    clear();
-    refresh();
+    clear(); refresh();
     rebuild_main_windows();
     draw_main_chrome();
     wrefresh(g_log_win);
-    mvwprintw(g_cmd_win, 0, 0, "> ");
     wrefresh(g_cmd_win);
 }
 
-/* 로그 창에 한 줄 출력 (스레드 안전) */
-static void ui_log(const std::string& line, int color_pair = 0, bool bold = false) {
-    if (!g_ui_ready || g_tm_active) return;
-    std::lock_guard<std::mutex> lk(g_ui_mtx);
-
-    if (color_pair) wattron(g_log_win, COLOR_PAIR(color_pair) | (bold ? A_BOLD : 0));
-    wprintw(g_log_win, "%s\n", line.c_str());
-    if (color_pair) wattroff(g_log_win, COLOR_PAIR(color_pair) | A_BOLD);
-
+/* UI 큐 드레인 (UI 스레드 전용) */
+static void ui_flush() {
+    if (!g_ui_ready || !g_log_win) return;
+    std::lock_guard<std::mutex> lk(g_ui_queue_mtx);
+    while (!g_ui_queue.empty()) {
+        auto& e = g_ui_queue.front();
+        if (e.color_pair)
+            wattron(g_log_win, COLOR_PAIR(e.color_pair) | (e.bold ? A_BOLD : 0));
+        wprintw(g_log_win, "%s\n", e.text.c_str());
+        if (e.color_pair)
+            wattroff(g_log_win, COLOR_PAIR(e.color_pair) | A_BOLD);
+        g_ui_queue.pop();
+    }
     wnoutrefresh(g_log_win);
-    wnoutrefresh(g_cmd_win);
-    doupdate();
 }
 
 // ─────────────────────────────────────────────────────────────────────
-//  로그 기록 & 에이전트 상태
+//  오버레이 창 (스크롤 가능, q로 닫기)
+// ─────────────────────────────────────────────────────────────────────
+
+static void show_overlay(const std::string& title, const std::vector<std::string>& lines) {
+    int rows, cols;
+    getmaxyx(stdscr, rows, cols);
+    WINDOW *win = newwin(rows, cols, 0, 0);
+    keypad(win, TRUE);
+    timeout(-1);
+
+    int view_h = rows - 2;
+    int scroll  = 0;
+    int total   = (int)lines.size();
+
+    while (true) {
+        werase(win);
+
+        /* 헤더 */
+        wattron(win, COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
+        mvwhline(win, 0, 0, ' ', cols);
+        mvwprintw(win, 0, 1, " %s", title.c_str());
+        wattroff(win, COLOR_PAIR(CP_STATUSBAR) | A_BOLD);
+
+        /* 내용 */
+        for (int i = 0; i < view_h - 1 && scroll + i < total; i++) {
+            const std::string& line = lines[scroll + i];
+            bool is_alert = (line.find("ALERT:") != std::string::npos);
+            if (is_alert) wattron(win, COLOR_PAIR(CP_LINE_ALERT) | A_BOLD);
+            int cw = cols - 2;
+            std::string disp = line.size() > (size_t)cw ? line.substr(0, cw) : line;
+            mvwprintw(win, i + 1, 1, "%-*s", cw, disp.c_str());
+            if (is_alert) wattroff(win, COLOR_PAIR(CP_LINE_ALERT) | A_BOLD);
+        }
+
+        /* 푸터 */
+        wattron(win, COLOR_PAIR(CP_STATUSBAR));
+        mvwhline(win, rows - 1, 0, ' ', cols);
+        mvwprintw(win, rows - 1, 1,
+                  " %d/%d lines  UP/DOWN: scroll  PgUp/PgDn: page  q: close",
+                  std::min(scroll + view_h - 1, total), total);
+        wattroff(win, COLOR_PAIR(CP_STATUSBAR));
+
+        wrefresh(win);
+
+        int ch = wgetch(win);
+        if (ch == 'q' || ch == 'Q') break;
+        if (ch == KEY_UP   && scroll > 0) scroll--;
+        if (ch == KEY_DOWN && scroll + view_h - 1 < total) scroll++;
+        if (ch == KEY_PPAGE) scroll = std::max(0, scroll - (view_h - 1));
+        if (ch == KEY_NPAGE) scroll = std::min(std::max(0, total - view_h + 1), scroll + view_h - 1);
+        if (ch == KEY_HOME) scroll = 0;
+        if (ch == KEY_END)  scroll = std::max(0, total - view_h + 1);
+        if (ch == KEY_RESIZE) {
+            getmaxyx(stdscr, rows, cols);
+            wresize(win, rows, cols);
+            view_h = rows - 2;
+        }
+    }
+
+    delwin(win);
+    restore_ui();
+    keypad(g_cmd_win, TRUE);
+    wtimeout(g_cmd_win, 100);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  로그 기록
 // ─────────────────────────────────────────────────────────────────────
 
 void log_message(const std::string& ip, const std::string& msg) {
-    /* 파일 영구 저장 */
+    /* 파일 저장 */
     {
-        std::lock_guard<std::mutex> lk(log_mutex);
+        std::lock_guard<std::mutex> lk(log_file_mutex);
         std::ofstream f(MASTER_LOG_FILE, std::ios::app);
         if (f.is_open()) {
             std::time_t now = std::time(nullptr);
@@ -195,13 +312,13 @@ void log_message(const std::string& ip, const std::string& msg) {
         if (msg.find("ALERT:") != std::string::npos) d.alert = true;
     }
 
-    /* 로그 창 출력 */
+    /* UI 큐 */
     bool is_alert = (msg.find("ALERT:") != std::string::npos);
-    std::string line = "[" + ip + "] " + msg;
+    std::string line = "[" + display_name(ip) + "] " + msg;
     if (is_alert)
-        ui_log(line, CP_LINE_ALERT, true);
+        ui_enqueue(line, CP_LINE_ALERT, true);
     else
-        ui_log(line);
+        ui_enqueue(line);
 }
 
 void update_agent_status(const std::string& ip, bool connected) {
@@ -214,11 +331,10 @@ void update_agent_status(const std::string& ip, bool connected) {
         std::lock_guard<std::mutex> lk(agent_data_mutex);
         if (connected) agent_data[ip];
     }
-
     std::string msg = connected
-        ? "[SYSTEM] Agent connected: " + ip
-        : "[SYSTEM] Agent disconnected: " + ip;
-    ui_log(msg, CP_SYSTEM, true);
+        ? "[SYSTEM] Agent connected: " + display_name(ip)
+        : "[SYSTEM] Agent disconnected: " + display_name(ip);
+    ui_enqueue(msg, CP_SYSTEM, true);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -261,7 +377,8 @@ static void draw_panel(WINDOW *win, const std::string& ip,
     box(win, 0, 0);
     wattroff(win, COLOR_PAIR(CP_BORDER_ALERT) | COLOR_PAIR(CP_BORDER_NORMAL) | A_BOLD);
 
-    std::string title = alert ? (" !! " + ip + " !! ") : (" " + ip + " ");
+    std::string dname = display_name(ip);
+    std::string title = alert ? (" !! " + dname + " !! ") : (" " + dname + " ");
     int tx = std::max(1, (w - (int)title.size()) / 2);
     wattron(win, COLOR_PAIR(alert ? CP_TITLE_ALERT : CP_TITLE_NORMAL) | A_BOLD);
     mvwprintw(win, 0, tx, "%s", title.c_str());
@@ -269,7 +386,6 @@ static void draw_panel(WINDOW *win, const std::string& ip,
 
     int ch = h - 2, cw = w - 2;
     int start = (int)logs.size() > ch ? (int)logs.size() - ch : 0;
-
     for (int i = 0; i < ch && start + i < (int)logs.size(); i++) {
         std::string line = logs[start + i];
         if ((int)line.size() > cw) line = line.substr(0, cw);
@@ -281,18 +397,15 @@ static void draw_panel(WINDOW *win, const std::string& ip,
     wrefresh(win);
 }
 
-static void draw_statusbar(int rows, int cols, int n_agents, int n_alerts) {
+static void draw_statusbar_tm(int rows, int cols, int n_agents, int n_alerts) {
     char tbuf[32];
     time_t now = time(nullptr);
     strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", localtime(&now));
-
     std::string left  = std::string(" ") + tbuf + "  Agents: " + std::to_string(n_agents);
     std::string right = "Alerts: " + std::to_string(n_alerts) + "  [c]lear  [q]uit ";
-
     int pad = cols - (int)left.size() - (int)right.size();
     std::string bar = left + std::string(std::max(0, pad), ' ') + right;
     if ((int)bar.size() > cols) bar = bar.substr(0, cols);
-
     attron(COLOR_PAIR(CP_STATUSBAR) | A_REVERSE);
     mvprintw(rows - 1, 0, "%s", bar.c_str());
     attroff(COLOR_PAIR(CP_STATUSBAR) | A_REVERSE);
@@ -318,13 +431,11 @@ static void run_dashboard(const std::vector<std::string>& ips) {
     while (true) {
         int ch = getch();
         if (ch == 'q' || ch == 'Q') break;
-
         if (ch == 'c' || ch == 'C') {
             std::lock_guard<std::mutex> lk(agent_data_mutex);
             for (auto& ip : ips)
                 if (agent_data.count(ip)) agent_data[ip].alert = false;
         }
-
         if (ch == KEY_RESIZE) {
             getmaxyx(stdscr, rows, cols);
             for (auto w : wins) delwin(w);
@@ -336,7 +447,6 @@ static void run_dashboard(const std::vector<std::string>& ips) {
             }
             clear(); refresh();
         }
-
         int n_alerts = 0;
         for (int i = 0; i < n; i++) {
             std::deque<std::string> logs_copy;
@@ -351,7 +461,7 @@ static void run_dashboard(const std::vector<std::string>& ips) {
             if (alert) n_alerts++;
             draw_panel(wins[i], ips[i], logs_copy, alert);
         }
-        draw_statusbar(rows, cols, n, n_alerts);
+        draw_statusbar_tm(rows, cols, n, n_alerts);
     }
 
     for (auto w : wins) delwin(w);
@@ -360,7 +470,7 @@ static void run_dashboard(const std::vector<std::string>& ips) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-//  에이전트 선택 화면 (full-screen, initscr 없이)
+//  에이전트 선택 화면
 // ─────────────────────────────────────────────────────────────────────
 
 static std::vector<std::string> select_agents_tui() {
@@ -370,7 +480,7 @@ static std::vector<std::string> select_agents_tui() {
         all.assign(connected_agents.begin(), connected_agents.end());
     }
     if (all.empty()) {
-        ui_log("[tm] No connected agents.", CP_SYSTEM, true);
+        ui_enqueue("[tm] No connected agents.", CP_SYSTEM, true);
         return {};
     }
 
@@ -392,10 +502,10 @@ static std::vector<std::string> select_agents_tui() {
             if (i == cursor) attron(A_REVERSE);
             if (checked[i]) {
                 attron(COLOR_PAIR(CP_SELECTED));
-                mvprintw(i + 3, 4, "[x] %s", all[i].c_str());
+                mvprintw(i + 3, 4, "[x] %s", display_name(all[i]).c_str());
                 attroff(COLOR_PAIR(CP_SELECTED));
             } else {
-                mvprintw(i + 3, 4, "[ ] %s", all[i].c_str());
+                mvprintw(i + 3, 4, "[ ] %s", display_name(all[i]).c_str());
             }
             if (i == cursor) attroff(A_REVERSE);
         }
@@ -407,8 +517,7 @@ static std::vector<std::string> select_agents_tui() {
         case KEY_DOWN: cursor = std::min((int)all.size() - 1, cursor + 1); break;
         case ' ':      checked[cursor] = !checked[cursor]; break;
         case 'a': case 'A':
-            std::fill(checked.begin(), checked.end(), true);
-            break;
+            std::fill(checked.begin(), checked.end(), true); break;
         case '\n': case KEY_ENTER: {
             std::vector<std::string> sel;
             for (int i = 0; i < (int)all.size(); i++)
@@ -416,95 +525,210 @@ static std::vector<std::string> select_agents_tui() {
             if (sel.size() > 4) sel.resize(4);
             return sel;
         }
-        case 'q': case 'Q':
-            return {};
+        case 'q': case 'Q': return {};
         }
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────
-//  명령어 셸
+//  명령어 핸들러
+// ─────────────────────────────────────────────────────────────────────
+
+static void cmd_trace_log(const std::string& target) {
+    std::string ip = resolve_ip(target);
+    std::ifstream f(MASTER_LOG_FILE);
+    if (!f.is_open()) {
+        ui_enqueue("[ERROR] Cannot open " + MASTER_LOG_FILE, CP_BORDER_ALERT, true);
+        return;
+    }
+    std::string needle = "[Agent: " + ip + "]";
+    std::vector<std::string> results;
+    std::string line;
+    while (std::getline(f, line))
+        if (line.find(needle) != std::string::npos) results.push_back(line);
+
+    show_overlay("trace-log: " + target + " (" + ip + ")  [" +
+                 std::to_string(results.size()) + " entries]", results);
+}
+
+static void cmd_trace_tr(const std::string& range) {
+    int start_h = -1, end_h = -1;
+    if (sscanf(range.c_str(), "%d:%d", &start_h, &end_h) != 2 ||
+        start_h < 0 || start_h > 23 || end_h < 0 || end_h > 23) {
+        ui_enqueue("Usage: trace-tr <start>:<end>  (e.g. trace-tr 1:13)", CP_SYSTEM, true);
+        return;
+    }
+
+    std::ifstream f(MASTER_LOG_FILE);
+    if (!f.is_open()) {
+        ui_enqueue("[ERROR] Cannot open " + MASTER_LOG_FILE, CP_BORDER_ALERT, true);
+        return;
+    }
+
+    /* 로그 형식: [YYYY-MM-DD HH:MM:SS] [Agent: ip] msg */
+    std::vector<std::string> results;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.find("ALERT:") == std::string::npos) continue;
+        if (line.size() < 14 || line[0] != '[') continue;
+        int hour = -1;
+        sscanf(line.c_str() + 12, "%d", &hour);
+        if (hour < 0) continue;
+
+        bool in_range = (start_h <= end_h)
+            ? (hour >= start_h && hour <= end_h)
+            : (hour >= start_h || hour <= end_h);  /* 자정 걸치는 경우 */
+        if (in_range) results.push_back(line);
+    }
+
+    char title[128];
+    snprintf(title, sizeof(title),
+             "trace-tr %02d:00 ~ %02d:00  [%d ALERTs]",
+             start_h, end_h, (int)results.size());
+    show_overlay(title, results);
+}
+
+static void cmd_tag(const std::string& ip, const std::string& name) {
+    if (ip.empty() || name.empty()) {
+        ui_enqueue("Usage: tag <ip> <name>", CP_SYSTEM, true); return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(tag_mutex);
+        /* 기존 태그 제거 */
+        auto old = g_ip_to_tag.find(ip);
+        if (old != g_ip_to_tag.end()) g_tag_to_ip.erase(old->second);
+        g_tag_to_ip[name] = ip;
+        g_ip_to_tag[ip]   = name;
+    }
+    save_tags();
+    ui_enqueue("Tagged: " + ip + " -> " + name, CP_SYSTEM, true);
+}
+
+static void cmd_untag(const std::string& name) {
+    if (name.empty()) {
+        ui_enqueue("Usage: untag <name>", CP_SYSTEM, true); return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(tag_mutex);
+        auto it = g_tag_to_ip.find(name);
+        if (it == g_tag_to_ip.end()) {
+            ui_enqueue("Tag not found: " + name, CP_BORDER_ALERT, true); return;
+        }
+        g_ip_to_tag.erase(it->second);
+        g_tag_to_ip.erase(it);
+    }
+    save_tags();
+    ui_enqueue("Removed tag: " + name, CP_SYSTEM, true);
+}
+
+static void cmd_tags() {
+    std::lock_guard<std::mutex> lk(tag_mutex);
+    if (g_tag_to_ip.empty()) {
+        ui_enqueue("No tags defined. Use: tag <ip> <name>", CP_SYSTEM, false);
+        return;
+    }
+    ui_enqueue("--- Tags ---", CP_TITLE_NORMAL, true);
+    for (auto& [name, ip] : g_tag_to_ip)
+        ui_enqueue("  " + name + " -> " + ip);
+    ui_enqueue("------------");
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  명령어 셸 (UI 스레드 — 모든 ncurses 호출은 여기서만)
 // ─────────────────────────────────────────────────────────────────────
 
 void command_shell() {
-    char buf[512];
+    char input_buf[512] = {};
+    int  input_pos = 0;
+
+    keypad(g_cmd_win, TRUE);
+    wtimeout(g_cmd_win, 100);
+
     while (true) {
-        /* 프롬프트 */
-        {
-            std::lock_guard<std::mutex> lk(g_ui_mtx);
-            mvwprintw(g_cmd_win, 0, 0, "> ");
-            wclrtoeol(g_cmd_win);
-            wrefresh(g_cmd_win);
-        }
+        /* 큐 드레인 */
+        ui_flush();
 
-        echo();
-        memset(buf, 0, sizeof(buf));
-        mvwgetnstr(g_cmd_win, 0, 2, buf, sizeof(buf) - 1);
-        noecho();
+        /* 프롬프트 갱신 */
+        mvwprintw(g_cmd_win, 0, 0, "> %-*s", COLS - 3, input_buf);
+        wmove(g_cmd_win, 0, 2 + input_pos);
+        wnoutrefresh(g_cmd_win);
+        doupdate();
 
-        std::string cmd_line(buf);
-        if (cmd_line.empty()) continue;
+        int ch = wgetch(g_cmd_win);
+        if (ch == ERR) continue;
 
-        std::stringstream ss(cmd_line);
-        std::string cmd, arg;
-        ss >> cmd >> arg;
+        if (ch == '\n' || ch == KEY_ENTER) {
+            std::string cmd_line(input_buf);
+            memset(input_buf, 0, sizeof(input_buf));
+            input_pos = 0;
+            if (cmd_line.empty()) continue;
 
-        if (cmd == "exit" || cmd == "quit") {
-            endwin();
-            exit(0);
+            std::stringstream ss(cmd_line);
+            std::string cmd, arg1, arg2;
+            ss >> cmd >> arg1 >> arg2;
 
-        } else if (cmd == "list") {
-            std::lock_guard<std::mutex> lk(clients_mutex);
-            ui_log("--- Connected Agents (" +
-                   std::to_string(connected_agents.size()) + ") ---", CP_TITLE_NORMAL, true);
-            for (const auto& a : connected_agents)
-                ui_log("  - " + a);
-            ui_log("------------------------------");
+            if (cmd == "exit" || cmd == "quit") {
+                endwin(); exit(0);
 
-        } else if (cmd == "tm") {
-            g_tm_active = true;
-            clear(); refresh();
+            } else if (cmd == "list") {
+                std::lock_guard<std::mutex> lk(clients_mutex);
+                ui_enqueue("--- Connected Agents (" +
+                           std::to_string(connected_agents.size()) + ") ---",
+                           CP_TITLE_NORMAL, true);
+                for (auto& a : connected_agents)
+                    ui_enqueue("  " + display_name(a));
+                ui_enqueue("------------------------------");
 
-            auto selected = select_agents_tui();
-            if (!selected.empty()) {
+            } else if (cmd == "tag") {
+                cmd_tag(arg1, arg2);
+
+            } else if (cmd == "untag") {
+                cmd_untag(arg1);
+
+            } else if (cmd == "tags") {
+                cmd_tags();
+
+            } else if (cmd == "tm") {
                 clear(); refresh();
-                run_dashboard(selected);
-            }
-
-            g_tm_active = false;
-            restore_ui();
-
-        } else if (cmd == "trace-log") {
-            if (arg.empty()) {
-                ui_log("Usage: trace-log <IP>", CP_SYSTEM, true);
-            } else {
-                std::ifstream f(MASTER_LOG_FILE);
-                if (!f.is_open()) {
-                    ui_log("[ERROR] Cannot open " + MASTER_LOG_FILE, CP_BORDER_ALERT, true);
-                } else {
-                    std::string needle = "[Agent: " + arg + "]";
-                    std::string line;
-                    int cnt = 0;
-                    ui_log("--- trace-log: " + arg + " ---", CP_TITLE_NORMAL, true);
-                    while (std::getline(f, line)) {
-                        if (line.find(needle) != std::string::npos) {
-                            bool is_alert = (line.find("ALERT:") != std::string::npos);
-                            ui_log(line, is_alert ? CP_LINE_ALERT : 0, is_alert);
-                            cnt++;
-                        }
-                    }
-                    ui_log("--- " + std::to_string(cnt) + " entries ---", CP_TITLE_NORMAL, true);
+                auto selected = select_agents_tui();
+                if (!selected.empty()) {
+                    clear(); refresh();
+                    run_dashboard(selected);
                 }
+                restore_ui();
+                keypad(g_cmd_win, TRUE);
+                wtimeout(g_cmd_win, 100);
+
+            } else if (cmd == "trace-log") {
+                if (arg1.empty())
+                    ui_enqueue("Usage: trace-log <ip|tag>", CP_SYSTEM, true);
+                else
+                    cmd_trace_log(arg1);
+
+            } else if (cmd == "trace-tr") {
+                if (arg1.empty())
+                    ui_enqueue("Usage: trace-tr <start>:<end>  e.g. trace-tr 1:13", CP_SYSTEM, true);
+                else
+                    cmd_trace_tr(arg1);
+
+            } else if (cmd == "help") {
+                ui_enqueue("  list                 : 연결된 에이전트 목록", CP_SYSTEM, false);
+                ui_enqueue("  tag <ip> <name>      : 에이전트에 이름 태그 지정", CP_SYSTEM, false);
+                ui_enqueue("  untag <name>         : 태그 제거", CP_SYSTEM, false);
+                ui_enqueue("  tags                 : 태그 목록", CP_SYSTEM, false);
+                ui_enqueue("  tm                   : Trace Monitor 대시보드", CP_SYSTEM, false);
+                ui_enqueue("  trace-log <ip|tag>   : 에이전트 전체 로그 조회", CP_SYSTEM, false);
+                ui_enqueue("  trace-tr  <H:H>      : 시간대 ALERT 조회 (e.g. 1:13)", CP_SYSTEM, false);
+                ui_enqueue("  exit                 : 서버 종료", CP_SYSTEM, false);
+
+            } else {
+                ui_enqueue("Unknown command. Type 'help'.", CP_BORDER_ALERT, false);
             }
 
-        } else if (cmd == "help") {
-            ui_log("  list              : 연결된 에이전트 목록", CP_SYSTEM, false);
-            ui_log("  tm                : Trace Monitor 대시보드 (TUI)", CP_SYSTEM, false);
-            ui_log("  trace-log <IP>    : 저장된 로그에서 에이전트 기록 조회", CP_SYSTEM, false);
-            ui_log("  exit              : 서버 종료", CP_SYSTEM, false);
-
-        } else {
-            ui_log("Unknown command. Type 'help'.", CP_BORDER_ALERT, false);
+        } else if (ch == KEY_BACKSPACE || ch == 127 || ch == '\b') {
+            if (input_pos > 0) input_buf[--input_pos] = '\0';
+        } else if (ch >= 32 && ch < 127 && input_pos < 500) {
+            input_buf[input_pos++] = (char)ch;
         }
     }
 }
@@ -520,13 +744,9 @@ void handle_client(int client_socket, struct sockaddr_in client_addr, SSL_CTX *s
     SSL *ssl = SSL_new(ssl_ctx);
     SSL_set_fd(ssl, client_socket);
     if (SSL_accept(ssl) <= 0) {
-        ERR_print_errors_fp(stderr);
-        SSL_free(ssl);
-        close(client_socket);
-        return;
+        SSL_free(ssl); close(client_socket); return;
     }
 
-    /* 에이전트 식별 IP: HELLO 메시지에서 추출 (NAT/mock 대응) */
     std::string ip(sock_ip);
     bool registered = false;
 
@@ -539,7 +759,6 @@ void handle_client(int client_socket, struct sockaddr_in client_addr, SSL_CTX *s
         std::string raw(buffer);
         size_t p1 = raw.find('|');
         size_t p2 = (p1 != std::string::npos) ? raw.find('|', p1 + 1) : std::string::npos;
-
         if (p2 == std::string::npos) { log_message(ip, raw); continue; }
 
         std::string type    = raw.substr(0, p1);
@@ -552,7 +771,6 @@ void handle_client(int client_socket, struct sockaddr_in client_addr, SSL_CTX *s
             update_agent_status(ip, true);
             registered = true;
         }
-
         if (type != "HELLO") log_message(ip, content);
     }
 
@@ -568,8 +786,8 @@ void handle_client(int client_socket, struct sockaddr_in client_addr, SSL_CTX *s
 int main() {
     SSL_CTX *ssl_ctx = create_server_ssl_ctx(MASTER_CERT, MASTER_KEY);
     if (!ssl_ctx) {
-        std::cerr << "TLS init failed. Check " << MASTER_CERT << " & " << MASTER_KEY << "\n";
-        std::cerr << "Hint: Run install.sh (master) to generate certificates.\n";
+        fprintf(stderr, "TLS init failed. Check %s & %s\n", MASTER_CERT, MASTER_KEY);
+        fprintf(stderr, "Hint: Run install.sh (master) to generate certificates.\n");
         return 1;
     }
 
@@ -579,17 +797,17 @@ int main() {
 
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) { perror("socket"); return 1; }
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
     address.sin_family      = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port        = htons(PORT);
-
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) { perror("bind"); return 1; }
     if (listen(server_fd, 10) < 0) { perror("listen"); return 1; }
 
+    load_tags();
     init_ui();
-    ui_log("Renux Master started. Listening on port " + std::to_string(PORT), CP_SYSTEM, true);
+    ui_enqueue("Renux Master started on port " + std::to_string(PORT), CP_SYSTEM, true);
 
+    /* accept 루프는 메인 스레드, command_shell이 UI 스레드 */
     std::thread(command_shell).detach();
 
     while (true) {
