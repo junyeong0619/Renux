@@ -95,6 +95,6 @@ client_e: client/client.c client/tui.c \
 	$(CC) $(CFLAGS) $(LDFLAGS) $(OPENSSL_LDFLAGS) -o $@ $^ -lncurses -lpthread -lssl -lcrypto
 
 renux_master: monitoring/master.cpp utils/ssl_utils.c
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(OPENSSL_LDFLAGS) -o $@ $^ -lssl -lcrypto
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(OPENSSL_LDFLAGS) -o $@ $^ -lssl -lcrypto -lncurses
 
 .PHONY: all clean renux
