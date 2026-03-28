@@ -418,13 +418,14 @@ void log_message(const std::string& ip, const std::string& msg) {
         if (f.is_open())
             f << "[" << tbuf << "] [Agent: " << ip << "] " << msg << "\n";
 
-        /* per-agent 파일 저장: agents/{ip}.log */
+        /* per-agent 파일 저장: agents/{ip}.log
+         * msg에 에이전트가 이미 [timestamp]를 붙여서 보내므로 그대로 저장 */
         std::string safe_ip = ip;
         std::replace(safe_ip.begin(), safe_ip.end(), ':', '_'); /* IPv6 대비 */
         std::string agent_path = AGENT_LOG_DIR + "/" + safe_ip + ".log";
         std::ofstream af(agent_path, std::ios::app);
         if (af.is_open())
-            af << "[" << tbuf << "] " << msg << "\n";
+            af << msg << "\n";
     }
 
     /* per-agent 업데이트 */
@@ -1225,7 +1226,6 @@ static void cmd_replay(const std::string& target) {
 
         if (body.find("EXEC ") == 0) {
             e.type = "EXEC";
-            /* comm + path + args 조합 → 읽기 좋은 형태로 */
             std::string comm, path, args;
             auto extract = [&](const std::string& key) -> std::string {
                 auto p = body.find(key + "=");
@@ -1237,11 +1237,25 @@ static void cmd_replay(const std::string& target) {
             comm = extract("comm");
             path = extract("path");
             args = extract("args");
-            /* path의 basename만 사용 (comm과 같은 경우 중복 제거) */
-            std::string basename = path;
-            auto slash = path.rfind('/');
-            if (slash != std::string::npos) basename = path.substr(slash + 1);
-            e.detail = (basename != comm ? basename : comm);
+
+            /* 시스템 크론 노이즈 필터 */
+            static const char* noise[] = {
+                "/usr/lib/sysstat", "/usr/bin/run-parts",
+                "/usr/sbin/cron",   "/usr/lib/apt",
+                nullptr
+            };
+            bool skip = false;
+            for (int ni = 0; noise[ni]; ni++)
+                if (path.find(noise[ni]) == 0) { skip = true; break; }
+            if (skip) continue;
+
+            /* path basename 추출 — path가 비어있으면 comm 사용 */
+            std::string basename;
+            if (!path.empty()) {
+                auto slash = path.rfind('/');
+                basename = (slash != std::string::npos) ? path.substr(slash + 1) : path;
+            }
+            e.detail = (!basename.empty() && basename != comm) ? basename : comm;
             if (!args.empty()) e.detail += " " + args;
         } else if (body.find("FILE ACCESS:") != std::string::npos) {
             e.type   = "FILE";
