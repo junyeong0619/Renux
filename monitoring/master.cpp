@@ -407,9 +407,8 @@ void command_shell() {
 // ─────────────────────────────────────────────────────────────────────
 
 void handle_client(int client_socket, struct sockaddr_in client_addr, SSL_CTX *ssl_ctx) {
-    char client_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &(client_addr.sin_addr), client_ip, INET_ADDRSTRLEN);
-    std::string ip(client_ip);
+    char sock_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(client_addr.sin_addr), sock_ip, INET_ADDRSTRLEN);
 
     SSL *ssl = SSL_new(ssl_ctx);
     SSL_set_fd(ssl, client_socket);
@@ -420,25 +419,39 @@ void handle_client(int client_socket, struct sockaddr_in client_addr, SSL_CTX *s
         return;
     }
 
-    update_agent_status(ip, true);
+    /* 에이전트 식별 IP: HELLO 메시지의 두 번째 필드 사용.
+     * 소켓 source IP 대신 에이전트가 직접 보고한 LAN IP를 쓴다.
+     * NAT 환경에서도 올바른 식별이 가능하고,
+     * mock 에이전트를 같은 머신에서 여러 개 띄울 때도 구분된다. */
+    std::string ip(sock_ip);  /* fallback: HELLO 전에 끊기면 소켓 IP 사용 */
 
     char buffer[BUFFER_SIZE];
+    bool registered = false;
+
     while (true) {
         memset(buffer, 0, BUFFER_SIZE);
         int n = SSL_read(ssl, buffer, BUFFER_SIZE - 1);
-        if (n <= 0) { update_agent_status(ip, false); break; }
+        if (n <= 0) { if (registered) update_agent_status(ip, false); break; }
 
         std::string raw(buffer);
         size_t p1 = raw.find('|');
         size_t p2 = (p1 != std::string::npos) ? raw.find('|', p1 + 1) : std::string::npos;
 
-        if (p2 != std::string::npos) {
-            std::string content = raw.substr(p2 + 1);
-            if (!content.empty() && content.back() == '\n') content.pop_back();
-            log_message(ip, content);
-        } else {
-            log_message(ip, raw);
+        if (p2 == std::string::npos) { log_message(ip, raw); continue; }
+
+        std::string type    = raw.substr(0, p1);
+        std::string msg_ip  = raw.substr(p1 + 1, p2 - p1 - 1);
+        std::string content = raw.substr(p2 + 1);
+        if (!content.empty() && content.back() == '\n') content.pop_back();
+
+        /* HELLO 첫 수신 시 에이전트 IP 확정 */
+        if (!registered) {
+            ip = msg_ip;
+            update_agent_status(ip, true);
+            registered = true;
         }
+
+        if (type != "HELLO") log_message(ip, content);
     }
 
     SSL_shutdown(ssl);
