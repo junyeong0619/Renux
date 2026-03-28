@@ -33,8 +33,6 @@ const std::string AGENT_LOG_FILE = "/var/log/renux.log";
 const std::string CONFIG_FILE    = "/etc/renux.conf";
 const size_t OFFLINE_BUF_MAX     = 1000;
 
-// 마스터 인증서 경로 (TLS 검증용)
-const std::string MASTER_CERT_PATH = "/etc/renux/master.crt";
 
 // --- 전역 변수 ---
 volatile sig_atomic_t keep_running = 1;
@@ -110,7 +108,7 @@ void connect_to_master() {
         close(master_sock); master_sock = -1; return;
     }
 
-    if (!g_ssl_ctx) g_ssl_ctx = create_client_ssl_ctx_verified(MASTER_CERT_PATH.c_str());
+    if (!g_ssl_ctx) g_ssl_ctx = create_client_ssl_ctx();
     if (!g_ssl_ctx) { close(master_sock); master_sock = -1; return; }
 
     master_ssl = SSL_new(g_ssl_ctx);
