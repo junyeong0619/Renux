@@ -594,7 +594,7 @@ static std::vector<int> make_buckets(const std::deque<std::time_t>& times,
 }
 
 /* 라벨별 스파크라인 한 행 그리기
- * density 값에 따라 ' ' / '.' / '+' / '#' 문자 사용 */
+ * 이진 표현: 이벤트 있으면 '|', 없으면 ' ' */
 static void draw_sparkline_row(WINDOW *win, int row, int label_w, int bar_w,
                                const char *label, int color_pair,
                                const std::vector<int>& buckets) {
@@ -603,22 +603,11 @@ static void draw_sparkline_row(WINDOW *win, int row, int label_w, int bar_w,
     mvwprintw(win, row, 1, "%-*s", label_w, label);
     wattroff(win, COLOR_PAIR(color_pair) | A_BOLD);
 
-    int max_val = *std::max_element(buckets.begin(), buckets.end());
-
-    /* 스파크라인 바 */
+    /* 스파크라인: 이벤트 유무만 표시 */
     wattron(win, COLOR_PAIR(color_pair));
     int x = 1 + label_w;
-    for (int col = 0; col < (int)buckets.size() && col < bar_w; col++) {
-        char ch;
-        if (max_val == 0 || buckets[col] == 0) ch = ' ';
-        else {
-            double ratio = (double)buckets[col] / max_val;
-            ch = (ratio > 0.66) ? '#'
-               : (ratio > 0.33) ? '+'
-                                 : '.';
-        }
-        mvwaddch(win, row, x + col, ch);
-    }
+    for (int col = 0; col < (int)buckets.size() && col < bar_w; col++)
+        mvwaddch(win, row, x + col, buckets[col] > 0 ? '|' : ' ');
     wattroff(win, COLOR_PAIR(color_pair));
 }
 
