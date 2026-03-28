@@ -259,7 +259,7 @@ static void show_overlay(const std::string& title, const std::vector<std::string
         wattron(win, COLOR_PAIR(CP_STATUSBAR));
         mvwhline(win, rows - 1, 0, ' ', cols);
         mvwprintw(win, rows - 1, 1,
-                  " %d/%d lines  UP/DOWN: scroll  PgUp/PgDn: page  q: close",
+                  " %d/%d lines  UP/DOWN: scroll  PgUp/PgDn | Ctrl+B/F: page  q: close",
                   std::min(scroll + view_h - 1, total), total);
         wattroff(win, COLOR_PAIR(CP_STATUSBAR));
 
@@ -269,8 +269,8 @@ static void show_overlay(const std::string& title, const std::vector<std::string
         if (ch == 'q' || ch == 'Q') break;
         if (ch == KEY_UP   && scroll > 0) scroll--;
         if (ch == KEY_DOWN && scroll + view_h - 1 < total) scroll++;
-        if (ch == KEY_PPAGE) scroll = std::max(0, scroll - (view_h - 1));
-        if (ch == KEY_NPAGE) scroll = std::min(std::max(0, total - view_h + 1), scroll + view_h - 1);
+        if (ch == KEY_PPAGE || ch == 2)  scroll = std::max(0, scroll - (view_h - 1));           /* PgUp / Ctrl+B */
+        if (ch == KEY_NPAGE || ch == 6)  scroll = std::min(std::max(0, total - view_h + 1), scroll + view_h - 1); /* PgDn / Ctrl+F */
         if (ch == KEY_HOME) scroll = 0;
         if (ch == KEY_END)  scroll = std::max(0, total - view_h + 1);
         if (ch == KEY_RESIZE) {
